@@ -1,0 +1,36 @@
+# CMake and build files
+build/
+[Bb]uild/
+[Bb]uilds/
+build-*/
+install/
+*.xcodeproj/
+*.VC.db
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Conan files
+conan.lock
+conanbuild.sh
+conanbuild.bat
+conanbuildinfo.cmake
+conaninfo.txt
+graph_info.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+*.bak
+
+# CTest files
+Testing/
+
+# Mac files
+.DS_Store
+build/
+cmake-build-*/

@@ -1,0 +1,101 @@
+# .github/workflows/ci.yml
+
+name: C++ CI with Conan, CMake, and CPack
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-test-package:
+    name: ${{ matrix.os }} - ${{ matrix.build_type }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Debug, Release]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # 步骤 1-5: 保持不变
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+      - name: Install CPack Generators
+        if: matrix.build_type == 'Release' && runner.os == 'Windows'
+        run: choco install nsis
+      - name: Setup Python for Conan
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Conan and create default profile
+        run: |
+          pip install conan
+          conan profile detect --force
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-${{ matrix.build_type }}-${{ hashFiles('**/conanfile.py') }}
+          restore-keys: |
+            conan-${{ runner.os }}-${{ matrix.build_type }}-
+      - name: Install dependencies with Conan
+        run: conan install . --build=missing -s build_type=${{ matrix.build_type }}
+
+      # 步骤 5.5: 获取小写名
+      - name: Set lowercase build type
+        id: build_type_lc
+        run: echo "value=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+        shell: bash
+
+      # (!!!) 步骤 6: 平台感知的 CMake 配置 (最终修正版) (!!!)
+      # 这是唯一需要平台判断的步骤
+      - name: Configure CMake
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            # Windows 只有一个配置预设，名为 "conan-default"
+            cmake --preset conan-default -DBUILD_TESTING=ON
+          else
+            # Linux/macOS 的配置预设与构建类型同名
+            cmake --preset conan-${{ steps.build_type_lc.outputs.value }} -DBUILD_TESTING=ON
+          fi
+
+      # (!!!) 步骤 7: 统一的 CMake 构建 (!!!)
+      # 构建预设在所有平台上都是同名的 ('conan-release' 或 'conan-debug')
+      - name: Build project with CMake
+        run: cmake --build --preset conan-${{ steps.build_type_lc.outputs.value }}
+
+      # (!!!) 步骤 8: 统一的单元测试 (!!!)
+      # 测试预设在所有平台上也是同名的
+      - name: Run Unit Tests with CTest
+        if: matrix.build_type == 'Debug'
+        run: ctest --preset conan-debug
+
+      # (!!!) 步骤 9: 统一的打包 (!!!)
+      # 使用构建预设来驱动打包目标，在所有平台上都有效
+      - name: Create package with CPack
+        if: matrix.build_type == 'Release'
+        run: cmake --build --preset conan-release --target package
+
+      # 步骤 10: 上传产物 - 无需改动
+      - name: Upload Build Artifacts
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: myproject-package-${{ matrix.os }}
+          path: |
+            build/Release/*.deb
+            build/Release/*.rpm
+            build/Release/*.dmg
+            build/Release/*.exe
+            build/Release/*.zip
+            build/Release/*.tar.gz
+            build/*.deb
+            build/*.rpm
+            build/*.dmg
+            build/*.exe
+            build/*.zip
+            build/*.tar.gz
+          if-no-files-found: ignore

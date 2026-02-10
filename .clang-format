@@ -1,0 +1,70 @@
+# .clang-format
+# Language: Cpp
+# BasedOnStyle: Google
+# 这份配置基于谷歌C++风格指南，并进行了一些符合现代实践的流行定制。
+
+# ----------------- 基础与语言特性 -----------------
+Language: Cpp
+Standard: Cpp17 # 声明你的C++标准，有助于clang-format更好地理解语法
+
+# ----------------- 缩进与换行 -----------------
+IndentWidth: 1          # 缩进宽度为4个空格
+UseTab: Never           # 永远不要使用Tab进行缩V进，全部使用空格
+TabWidth: 4             # 如果UseTab为Always或ForIndentation，一个Tab的宽度
+
+BreakBeforeBraces: Allman # 大括号换行风格。Allman风格即大括号总是另起一行。
+  # 可选值: Attach (附在行尾), Linux, Stroustrup, Allman, GNU
+  # 示例 (Allman):
+  # void myFunction()
+  # {
+  #     ...
+# }
+
+AllowShortFunctionsOnASingleLine: None # 不允许将短函数写在同一行。例如`int f() { return 0; }`
+# 可选值: None, InlineOnly, Empty, All
+
+AllowShortBlocksOnASingleLine: false   # 不允许将短代码块放在同一行。例如 `if (a) { return; }`
+
+# ----------------- 指针与引用 -----------------
+PointerAlignment: Left  # 指针/引用的星号(*)或与号(&)的位置。Left表示靠左，紧随类型。
+  # 可选值: Left, Right, Middle
+  # 示例 (Left): int* p; const std::string& s;
+# 示例 (Right): int *p; const std::string &s;
+
+# ----------------- 空格控制 -----------------
+SpacesInParentheses: false       # 括号内侧不加空格。例如 `myFunction( a, b )` 会被格式化为 `myFunction(a, b)`
+SpacesInCStyleCastParentheses: false # C风格强制类型转换的括号内不加空格。例如 `( int )a` 会被格式化为 `(int)a`
+
+# ----------------- 列宽与断行 -----------------
+ColumnLimit: 120        # 每行的最大字符数。超过这个长度会自动换行。谷歌默认为80，但对于现代宽屏显示器，100或120更常见。
+
+# ----------------- 头文件排序 -----------------
+SortIncludes: true              # 自动对 #include 进行排序
+IncludeBlocks: Regroup          # 对 #include 进行分组和重新排序
+IncludeCategories:                # 定义 #include 的分类和排序优先级
+  - Regex:           '^<.*\.h>'   # 1. C系统头文件 (例如 <stdio.h>)
+    Priority:        1
+  - Regex:           '^<.*>'     # 2. C++系统头文件 (例如 <vector>, <string>)
+    Priority:        2
+  - Regex:           '.*'         # 3. 其他所有头文件 (包括项目内头文件和第三方库头文件)
+    Priority:        3
+
+# ----------------- 其他美化选项 -----------------
+FixNamespaceComments: true      # 为长的命名空间末尾的右大括号后添加注释。
+# 例如 `} // namespace my_namespace`
+
+AllowTrailingCommas: true       # 允许在列表的最后一个元素后添加逗号，方便版本控制。
+  # 例如 `int arr[] = {1, 2, 3,};`
+
+# 如果你想更细致地控制项目内头文件和第三方库的排序，可以这样配置：
+# IncludeCategories:
+#  - Regex:           '^<.*\.h>'
+#    Priority:        1
+#  - Regex:           '^<.*>'
+#    Priority:        2
+#  - Regex:           '^(fmt/|spdlog/|gtest/).*' # 匹配Conan管理的第三方库
+#    Priority:        3
+#  - Regex:           '^cppsharp/.*' # 匹配项目内其他模块的头文件
+#    Priority:        4
+#  - Regex:           '.*' # 匹配与当前文件在同一目录的头文件
+#    Priority:        5

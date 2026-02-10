@@ -1,0 +1,125 @@
+# .github/workflows/release.yml (最终、完美、通用的版本)
+
+name: Create Project Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build_and_package:
+    name: Build & Package on ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+      # 步骤 1-8: 保持不变，它们是正确的
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+      - name: Install CPack Generators
+        if: runner.os == 'Windows'
+        run: choco install nsis
+      - name: Setup Python and Conan
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install conan && conan profile detect --force
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ runner.os }}-Release-${{ hashFiles('**/conanfile.py') }}
+          restore-keys: |
+            conan-${{ runner.os }}-Release-
+      - name: Install dependencies for Release
+        run: conan install . --build=missing -s build_type=Release
+      - name: Configure CMake
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            cmake --preset conan-default -DBUILD_TESTING=OFF
+          else
+            cmake --preset conan-release -DBUILD_TESTING=OFF
+          fi
+      - name: Build project
+        run: cmake --build --preset conan-release
+      - name: Create package with CPack
+        run: cmake --build --preset conan-release --target package
+
+      # ====================================================================
+      # !!! 最终的核心修正：精确查找安装包，忽略编译产物 !!!
+      # ====================================================================
+
+      - name: Stage Artifact
+        shell: bash
+        run: |
+          mkdir staging
+          
+          # 在 Windows 上，使用更精确的模式 '*-*.*.exe' 来区分安装包和普通 exe
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            PACKAGE_FILE=$(find build -path '*/_CPack_Packages' -prune -o -name "*-*.*.exe" -print | head -n 1)
+          elif [ "$RUNNER_OS" == "Linux" ]; then
+            PACKAGE_FILE=$(find build -path '*/_CPack_Packages' -prune -o -name "*.deb" -print -o -name "*.tar.gz" -print | head -n 1)
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            PACKAGE_FILE=$(find build -path '*/_CPack_Packages' -prune -o -name "*.dmg" -print -o -name "*.tar.gz" -print | head -n 1)
+          fi
+          
+          if [ -z "$PACKAGE_FILE" ]; then
+            echo "::error::Could not find the final package file!"
+            echo "Listing all build directory contents for debugging:"
+            ls -R build
+            exit 1
+          fi
+          
+          echo "Found final package: $PACKAGE_FILE"
+          echo "Moving to staging directory..."
+          mv "$PACKAGE_FILE" staging/
+
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: staging/
+
+  create_release:
+    name: Create GitHub Release
+    needs: build_and_package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+      - name: Install Pandoc and LaTeX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc texlive-xetex fonts-noto
+          sudo fc-cache -fv
+      - name: Generate Release PDF
+        run: |
+          cp CHANGELOG.md version.md
+          PDF_FILENAME="version-${{ github.ref_name }}.pdf"
+          pandoc version.md --pdf-engine=xelatex -V "sansfont:Noto Sans" -o "${PDF_FILENAME}"
+          echo "PDF_NAME=${PDF_FILENAME}" >> $GITHUB_ENV
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+      - name: Display structure of downloaded files
+        run: ls -R dist
+      - name: Create GitHub Release and Upload All Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            ${{ env.PDF_NAME }}
+            dist/*
