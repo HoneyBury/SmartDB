@@ -71,10 +71,17 @@ class MyProjectConan(ConanFile):
     def requirements(self):
         """这些是库本身在运行时或编译时真正需要的、需要传递给消费者的依赖。"""
         self.output.info("<<<<<< RUNNING requirements() METHOD >>>>>>")
+
+        # 基础工具
         self.requires("fmt/10.2.1", visible=True)
-        self.requires("spdlog/1.12.0", visible=True)
+        self.requires("spdlog/1.13.0", visible=True) # 更新到较新版本
+        self.requires("nlohmann_json/3.11.3", visible=True) # 用于 NoSQL 及通用数据交换
         self.requires("gtest/1.14.0")
 
+        # 数据库驱动
+        self.requires("sqlite3/3.45.1")
+        self.requires("libmysqlclient/8.1.0") # 暂时注释，先跑通 SQLite，避免环境配置干扰
+        # self.requires("mongo-cxx-driver/3.8.1") # 暂时注释，后续开启
     def config_options(self):
         if self.settings.os == "Windows":
             self.options.rm_safe("fPIC")

@@ -4,6 +4,11 @@
 add_library(${PROJECT_NAME} STATIC
         cppsharp/my_lib.cpp
         cppsharp/my_lib.hpp
+        sdb/types.hpp
+        sdb/idb.hpp
+        sdb/db.hpp
+        sdb/drivers/sqlite_driver.hpp
+        sdb/drivers/mysql_driver.hpp
 )
 
 # 2. 设置库的属性
@@ -18,10 +23,15 @@ set_project_properties(${PROJECT_NAME})
 # 3. 链接第三方库
 find_package(fmt REQUIRED)
 find_package(spdlog REQUIRED)
-
+find_package(SQLite3 REQUIRED)
+find_package(nlohmann_json REQUIRED)
+find_package(libmysqlclient REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC
         fmt::fmt
         spdlog::spdlog
+        SQLite::SQLite3
+        nlohmann_json::nlohmann_json
+        libmysqlclient::libmysqlclient
 )
 
 # --- 安装规则 ---
