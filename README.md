@@ -1,86 +1,113 @@
-﻿# My Modern C++ Project
+# SmartDB（当前仓库状态说明）
 
-这是一个基于现代CMake和Conan 2.0的C++项目脚手架。
+SmartDB 是一个基于 **CMake + Conan 2** 的现代 C++ 项目，目前处于从通用脚手架向数据库抽象库演进的早期阶段。
 
-## 特性
+> 说明：本 README 按当前仓库的真实内容整理，避免仅停留在模板描述。
 
--   C++17 标准，支持 C++14 及以上
--   CMake (Target-based)
--   Conan 2.0 依赖管理，自动从 CMakeLists.txt 读取项目信息
--   Google Test 集成
--   跨平台打包（支持 NSIS/DEB/DragNDrop 等）
--   支持桌面/开始菜单快捷方式、图标自定义
--   清晰的项目结构，源码/测试/资源分离
--   Github Action CI/CD 集成
+## 项目现状
 
-## 依赖
+当前代码中已经存在两条主线：
 
--   C++ 编译器 (支持 C++14及以上)
--   CMake (>= 3.23)
--   Conan (>= 2.0)
+1. **通用 C++ 示例库（cppsharp）**
+   - `greet()`：基于 `fmt` 生成欢迎文案并通过 `spdlog` 输出。
+   - `setup_logger()`：初始化日志级别与输出格式。
+2. **SmartDB 类型层（sdb）**
+   - `sdb::DbValue`：统一数据库字段值的变体类型（NULL/int/int64/double/bool/string/blob）。
+   - `sdb::isNull()`：判断字段是否为空。
+   - `sdb::toString()`：将字段值转换为字符串，便于日志与调试。
 
-## 如何构建
+另外，`src/main.cpp` 中包含了面向 MySQL/SQLite 的数据库管理器调用示例（注册驱动、读取 JSON 配置、执行 SQL），用于展示目标架构方向。
 
-1.  **克隆仓库**
-    ```bash
-    git clone https://github.com/HoneyBury/CppSharp.git
-    cd CppSharp
-    ```
+## 当前目录结构
 
-2.  **安装Conan依赖**
-    此命令会读取 `conanfile.py`，下载依赖，并在 `build/` 目录下生成CMake集成所需的文件。
-    ```bash
-    conan install . -s build_type=Debug --build=missing
-    conan install . -s build_type=Release --build=missing
-    ```
+```text
+SmartDB/
+├── CMakeLists.txt              # 顶层构建、安装、CPack 打包配置
+├── conanfile.py                # Conan 2 配方（依赖、布局、构建流程）
+├── src/
+│   ├── CMakeLists.txt
+│   ├── main.cpp                # SmartDB 连接流程示例
+│   ├── cppsharp/
+│   │   ├── my_lib.hpp
+│   │   └── my_lib.cpp
+│   └── sdb/
+│       └── types.hpp           # DbValue 及辅助函数
+├── tests/
+│   ├── CMakeLists.txt
+│   └── main_test.cpp           # gtest 示例测试
+├── cmake/                      # 自定义 CMake 模块与配置模板
+├── assets/                     # 安装包图标
+└── LICENSE
+```
 
-3.  **配置CMake项目**
-    使用Conan生成的toolchain文件来配置CMake。
-    ```bash
-    # 推荐使用预设命令（Windows/Linux/Mac 通用）
-    cmake --preset conan-debug
-    cmake --preset conan-release
-    # 或手动指定 toolchain
-    cmake -S . -B build/release -DCMAKE_TOOLCHAIN_FILE="build/generators/conan_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
-    cmake -S . -B build/debug -DCMAKE_TOOLCHAIN_FILE="build/generators/conan_toolchain.cmake" -DCMAKE_BUILD_TYPE=Debug
-    ```
+## 技术栈与依赖
 
-4.  **构建项目**
-    ```bash
-    cmake --build --preset conan-debug
-    cmake --build --preset conan-release
-    # 或
-    cmake --build build/release
-    cmake --build build/debug
-    ```
+- **语言标准**：C++17（代码校验最低 C++14）
+- **构建系统**：CMake >= 3.23
+- **包管理**：Conan >= 2.0
+- **已声明三方库**：
+  - `fmt`
+  - `spdlog`
+  - `nlohmann_json`
+  - `sqlite3`
+  - `libmysqlclient`
+  - `gtest`
 
-5.  **运行**
-    ```bash
-    # 运行主程序
-    ./build/release/bin/app
-    # Windows 预设方式
-    ./build/bin/app
-    # 运行测试
-    cd build/release
-    ctest -C Release --output-on-failure
-    cd ../..
-    ```
+## 构建步骤（Conan + CMake）
 
-6. **打包与安装包生成**
-    ```bash
-    # 推荐使用 CPack 生成安装包（需 CMake >= 3.23）
-    cmake --build --preset conan-release --target package
-    # 或直接用 cpack
-    cpack -G NSIS   # Windows 下生成 .exe 安装包
-    cpack -G DEB    # Linux 下生成 .deb 包
-    cpack -G DragNDrop # Mac 下生成 .dmg 包
-    ```
-    - 安装包会自动包含 LICENSE、README.md、图标、快捷方式等资源。
-    - Windows 下支持桌面/开始菜单快捷方式，图标自定义。
+### 1) 安装依赖
 
-## 其他说明
+```bash
+conan install . -s build_type=Debug --build=missing
+conan install . -s build_type=Release --build=missing
+```
 
-- `conanfile.py` 会自动从 `CMakeLists.txt` 读取项目名称、版本、描述，确保元数据一致。
-- `CMakeLists.txt` 支持多平台、多架构输出目录和打包配置。
-- 所有源码、测试、资源、配置文件均通过 Conan/CMake 自动导出和打包。
-- 如需自定义打包行为，可修改 `CMakeLists.txt` 中的 CPack/NSIS/DEB 相关配置。
+### 2) 配置工程
+
+```bash
+cmake --preset conan-debug
+cmake --preset conan-release
+```
+
+### 3) 编译
+
+```bash
+cmake --build --preset conan-debug
+cmake --build --preset conan-release
+```
+
+### 4) 运行测试
+
+```bash
+ctest --preset conan-debug --output-on-failure
+ctest --preset conan-release --output-on-failure
+```
+
+## 打包
+
+项目已配置 CPack：
+
+- Windows：NSIS
+- Linux：DEB
+- macOS：DragNDrop
+
+示例：
+
+```bash
+cmake --build --preset conan-release --target package
+```
+
+## 开发提示（重要）
+
+当前仓库中 `src/main.cpp` 与 `src/CMakeLists.txt` 引用了 `sdb/db.hpp`、`sdb/idb.hpp`、`sdb/drivers/*` 等文件，但这些文件尚未在仓库落地。
+
+因此如果你直接构建完整示例程序，可能会因为缺失头文件而失败。建议下一步优先补齐以下模块：
+
+1. `IDatabaseDriver` / `IConnection` / `IResultSet` 接口定义
+2. `DatabaseManager`（驱动注册 + 配置装载 + 工厂创建连接）
+3. SQLite / MySQL driver 最小可运行实现
+4. 对应单元测试（连接生命周期、查询结果映射、错误路径）
+
+---
+
+如果你愿意，我可以下一步直接帮你把上述缺失的 `sdb` 核心接口和一个可跑通的 SQLite 最小实现补齐，并把 README 同步为“可运行版本”。
