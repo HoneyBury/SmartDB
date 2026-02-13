@@ -7,6 +7,7 @@ add_library(${PROJECT_NAME} STATIC
         sdb/types.hpp
         sdb/idb.hpp
         sdb/db.hpp
+        sdb/connection_pool.hpp
         sdb/drivers/sqlite_driver.hpp
         sdb/drivers/mysql_driver.hpp
 )

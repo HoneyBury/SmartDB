@@ -1,4 +1,5 @@
-﻿#include <filesystem>
+﻿#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "sdb/db.hpp"
+#include "sdb/connection_pool.hpp"
 #include "sdb/drivers/mysql_driver.hpp"
 #include "sdb/drivers/sqlite_driver.hpp"
 
@@ -94,6 +96,28 @@ int main() {
             } else {
                 spdlog::error("No results returned from SQLite query.");
             }
+        }
+
+        // ==========================================
+        // 使用连接池连接 SQLite
+        // ==========================================
+        spdlog::info("--- Pooling 'my_sqlite' ---");
+        sdb::ConnectionPool::Options poolOptions;
+        poolOptions.minSize = 1;
+        poolOptions.maxSize = 4;
+        poolOptions.waitTimeout = std::chrono::milliseconds(2000);
+
+        auto pool = manager.createPool("my_sqlite", poolOptions);
+        auto pooledConn = pool->acquire();
+        if (pooledConn) {
+            pooledConn->execute("CREATE TABLE IF NOT EXISTS pool_tb (id INTEGER, val TEXT)");
+            pooledConn->execute("INSERT INTO pool_tb VALUES (1, 'Hello from Pool!')");
+            auto rs = pooledConn->query("SELECT val FROM pool_tb WHERE id = 1");
+            if (rs && rs->next()) {
+                spdlog::info("Pool result: {}", std::get<std::string>(rs->get("val")));
+            }
+        } else {
+            spdlog::warn("Pool acquire failed: {}", pool->lastError());
         }
 
     } catch (const std::exception& e) {

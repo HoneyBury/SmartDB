@@ -1,5 +1,6 @@
 #pragma once
 #include "idb.hpp"
+#include "connection_pool.hpp"
 #include <unordered_map>
 #include <mutex>
 #include <fstream>
@@ -79,9 +80,113 @@ public:
         return it->second->createConnection(config);
     }
 
+    std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName) {
+        return createPool(connectionName, ConnectionPool::Options{});
+    }
+
+    std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName,
+                                               ConnectionPool::Options options) {
+        options = normalizeOptions(options);
+        const auto key = poolKeyForName(connectionName, options);
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto cached = getCachedPoolLocked(key);
+            if (cached) {
+                return cached;
+            }
+        }
+
+        auto factory = [this, connectionName]() {
+            return this->createConnection(connectionName);
+        };
+        auto pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto cached = getCachedPoolLocked(key);
+            if (cached) {
+                return cached;
+            }
+            poolCache_[key] = pool;
+        }
+        return pool;
+    }
+
+    std::shared_ptr<ConnectionPool> createPoolRaw(const std::string& driverName,
+                                                  const nlohmann::json& config) {
+        return createPoolRaw(driverName, config, ConnectionPool::Options{});
+    }
+
+    std::shared_ptr<ConnectionPool> createPoolRaw(const std::string& driverName,
+                                                  const nlohmann::json& config,
+                                                  ConnectionPool::Options options) {
+        options = normalizeOptions(options);
+        const auto key = poolKeyForRaw(driverName, config, options);
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto cached = getCachedPoolLocked(key);
+            if (cached) {
+                return cached;
+            }
+        }
+
+        auto factory = [this, driverName, config]() {
+            return this->createConnectionRaw(driverName, config);
+        };
+        auto pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto cached = getCachedPoolLocked(key);
+            if (cached) {
+                return cached;
+            }
+            poolCache_[key] = pool;
+        }
+        return pool;
+    }
+
 private:
+    static ConnectionPool::Options normalizeOptions(ConnectionPool::Options options) {
+        if (options.minSize > options.maxSize) {
+            options.minSize = options.maxSize;
+        }
+        return options;
+    }
+
+    static std::string optionsKey(const ConnectionPool::Options& options) {
+        std::string key = "min=" + std::to_string(options.minSize);
+        key += ";max=" + std::to_string(options.maxSize);
+        key += ";wait=" + std::to_string(options.waitTimeout.count());
+        key += ";borrow=" + std::to_string(options.testOnBorrow ? 1 : 0);
+        key += ";return=" + std::to_string(options.testOnReturn ? 1 : 0);
+        return key;
+    }
+
+    static std::string poolKeyForName(const std::string& connectionName,
+                                      const ConnectionPool::Options& options) {
+        return "name:" + connectionName + "|" + optionsKey(options);
+    }
+
+    static std::string poolKeyForRaw(const std::string& driverName,
+                                     const nlohmann::json& config,
+                                     const ConnectionPool::Options& options) {
+        return "raw:" + driverName + "|" + config.dump() + "|" + optionsKey(options);
+    }
+
+    std::shared_ptr<ConnectionPool> getCachedPoolLocked(const std::string& key) {
+        auto it = poolCache_.find(key);
+        if (it == poolCache_.end()) {
+            return {};
+        }
+        auto pool = it->second.lock();
+        if (!pool) {
+            poolCache_.erase(it);
+        }
+        return pool;
+    }
+
     std::unordered_map<std::string, std::shared_ptr<IDriver>> drivers_;
     nlohmann::json configs_;
+    std::unordered_map<std::string, std::weak_ptr<ConnectionPool>> poolCache_;
     std::mutex mtx_;
 };
 

@@ -1,11 +1,21 @@
 #include <gtest/gtest.h>
 #include "cppsharp/my_lib.hpp"
 #include "sdb/types.hpp"
+#include "sdb/db.hpp"
+#include "sdb/connection_pool.hpp"
 #include "sdb/drivers/sqlite_driver.hpp"
 #include "sdb/drivers/mysql_driver.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 class MyLibTest : public ::testing::Test {
 protected:
@@ -57,6 +67,180 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
 
     auto payload = std::get<std::vector<uint8_t>>(rs->get("payload"));
     EXPECT_EQ(payload, blob);
+}
+
+TEST(ConnectionPoolTest, ReusesSingleConnection) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.minSize = 0;
+    options.waitTimeout = std::chrono::milliseconds(0);
+
+    auto pool = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+        options);
+
+    auto conn1 = pool->acquire();
+    ASSERT_TRUE(conn1);
+    auto* firstPtr = conn1.get();
+    conn1.reset();
+
+    auto conn2 = pool->acquire();
+    ASSERT_TRUE(conn2);
+    EXPECT_EQ(conn2.get(), firstPtr);
+}
+
+TEST(ConnectionPoolTest, ExhaustedPoolTimesOut) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.minSize = 0;
+    options.waitTimeout = std::chrono::milliseconds(50);
+
+    auto pool = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+        options);
+
+    auto conn1 = pool->acquire();
+    ASSERT_TRUE(conn1);
+
+    auto conn2 = pool->acquire();
+    EXPECT_FALSE(conn2);
+    EXPECT_NE(pool->lastError().find("timed out"), std::string::npos);
+    EXPECT_LE(pool->totalSize(), options.maxSize);
+}
+
+TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 4;
+    options.minSize = 0;
+    options.waitTimeout = std::chrono::milliseconds(500);
+
+    auto pool = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+        options);
+
+    std::atomic<int> current{0};
+    std::atomic<int> failures{0};
+    int maxInUse = 0;
+    std::mutex maxMtx;
+    std::vector<std::thread> threads;
+    threads.reserve(12);
+
+    for (int i = 0; i < 12; ++i) {
+        threads.emplace_back([&]() {
+            auto conn = pool->acquire();
+            if (!conn) {
+                ++failures;
+                return;
+            }
+            const int inUse = ++current;
+            {
+                std::lock_guard<std::mutex> lock(maxMtx);
+                if (inUse > maxInUse) {
+                    maxInUse = inUse;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            --current;
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(failures.load(), 0);
+    EXPECT_LE(maxInUse, static_cast<int>(options.maxSize));
+    EXPECT_LE(pool->totalSize(), options.maxSize);
+    EXPECT_EQ(pool->idleSize(), pool->totalSize());
+}
+
+TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
+    auto& manager = sdb::DatabaseManager::instance();
+    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+
+    nlohmann::json j;
+    j["connections"]["pool_sqlite"] = {
+        {"driver", "sqlite"},
+        {"path", ":memory:"}
+    };
+
+    const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / ("smartdb_pool_config_" + stamp + ".json");
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out.is_open());
+        out << j.dump(2);
+    }
+
+    ASSERT_TRUE(manager.loadConfig(path.string()));
+
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 2;
+    options.waitTimeout = std::chrono::milliseconds(200);
+
+    auto pool = manager.createPool("pool_sqlite", options);
+    auto poolAgain = manager.createPool("pool_sqlite", options);
+    ASSERT_EQ(pool.get(), poolAgain.get());
+
+    auto conn = pool->acquire();
+    ASSERT_TRUE(conn);
+    ASSERT_TRUE(conn->isOpen());
+    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS pool_demo (id INTEGER)"), 0);
+
+    std::filesystem::remove(path);
+}
+
+TEST(ConnectionPoolTest, CreateFromDatabaseManagerRaw) {
+    auto& manager = sdb::DatabaseManager::instance();
+    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.waitTimeout = std::chrono::milliseconds(100);
+
+    auto pool = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+    auto conn = pool->acquire();
+    ASSERT_TRUE(conn);
+    ASSERT_TRUE(conn->isOpen());
+    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS pool_raw (id INTEGER)"), 0);
+}
+
+TEST(ConnectionPoolTest, DatabaseManagerPoolCacheReuseSameOptions) {
+    auto& manager = sdb::DatabaseManager::instance();
+    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 2;
+    options.waitTimeout = std::chrono::milliseconds(100);
+
+    auto pool1 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+    auto pool2 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+
+    ASSERT_TRUE(pool1);
+    ASSERT_TRUE(pool2);
+    EXPECT_EQ(pool1.get(), pool2.get());
+}
+
+TEST(ConnectionPoolTest, DatabaseManagerPoolCacheSeparatesOptions) {
+    auto& manager = sdb::DatabaseManager::instance();
+    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+
+    sdb::ConnectionPool::Options optionsA;
+    optionsA.maxSize = 1;
+    optionsA.waitTimeout = std::chrono::milliseconds(100);
+
+    sdb::ConnectionPool::Options optionsB = optionsA;
+    optionsB.maxSize = 2;
+
+    auto pool1 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsA);
+    auto pool2 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsB);
+
+    ASSERT_TRUE(pool1);
+    ASSERT_TRUE(pool2);
+    EXPECT_NE(pool1.get(), pool2.get());
 }
 
 

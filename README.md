@@ -5,6 +5,7 @@ SmartDB 是一个基于 **CMake + Conan 2 + C++17** 的轻量数据库抽象项�
 - 统一数据库值类型 `DbValue`
 - 数据库接口抽象：`IConnection` / `IResultSet` / `IDriver`
 - 驱动注册与配置管理：`DatabaseManager`
+- 线程安全连接池：`ConnectionPool`
 - SQLite / MySQL 驱动实现（含基础查询、执行、事务接口）
 
 ## 当前能力
@@ -16,6 +17,7 @@ SmartDB 是一个基于 **CMake + Conan 2 + C++17** 的轻量数据库抽象项�
 - `types.hpp`：跨数据库的值类型定义与辅助函数
 - `idb.hpp`：统一数据库接口定义
 - `db.hpp`：驱动注册、JSON 配置加载、连接工厂
+- `connection_pool.hpp`：线程安全连接池与超时/容量控制
 
 ### 2) 驱动实现
 
@@ -143,6 +145,6 @@ SmartDB/
 ## 后续建议
 
 - 为 MySQL 驱动补齐真正的参数化执行（`MYSQL_STMT`）
-- 增加连接池与健康检查
+- 增加连接池健康检查/指标
 - 增加统一错误码与错误分类
 - 增加更多集成测试（真实 MySQL 服务）
