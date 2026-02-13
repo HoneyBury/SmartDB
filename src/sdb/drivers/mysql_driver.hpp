@@ -123,10 +123,6 @@ class MysqlConnection : public IConnection {
     nlohmann::json config_;
     std::string lastErr_;
 
-    static bool isIntegerType(const DbValue& value) {
-        return std::holds_alternative<int>(value) || std::holds_alternative<int64_t>(value) || std::holds_alternative<bool>(value);
-    }
-
 public:
     explicit MysqlConnection(const nlohmann::json& config) : config_(config) {}
 
@@ -212,8 +208,132 @@ public:
     }
 
     int64_t execute(const std::string& sql, const std::vector<DbValue>& params) override {
-        // TODO
-        return 1;
+        if (!isOpen()) {
+            lastErr_ = "Connection is closed";
+            return -1;
+        }
+
+        MYSQL_STMT* stmt = mysql_stmt_init(conn_);
+        if (!stmt) {
+            lastErr_ = "mysql_stmt_init failed";
+            return -1;
+        }
+
+        auto cleanupStmt = [&stmt]() {
+            if (stmt) {
+                mysql_stmt_close(stmt);
+                stmt = nullptr;
+            }
+        };
+
+        if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.size())) != 0) {
+            lastErr_ = mysql_stmt_error(stmt);
+            spdlog::error("MySQL Prepare Error: {} | SQL: {}", lastErr_, sql);
+            cleanupStmt();
+            return -1;
+        }
+
+        const auto expectedParams = mysql_stmt_param_count(stmt);
+        if (expectedParams != params.size()) {
+            lastErr_ = "parameter count mismatch: expected " + std::to_string(expectedParams) +
+                       ", got " + std::to_string(params.size());
+            cleanupStmt();
+            return -1;
+        }
+
+        std::vector<MYSQL_BIND> binds(params.size());
+        std::vector<unsigned long> lengths(params.size(), 0);
+        std::vector<std::unique_ptr<bool>> isNulls;
+        isNulls.reserve(params.size());
+        std::vector<int32_t> i32Vals(params.size(), 0);
+        std::vector<int64_t> i64Vals(params.size(), 0);
+        std::vector<double> f64Vals(params.size(), 0.0);
+        std::vector<int8_t> boolVals(params.size(), 0);
+        std::vector<std::string> strVals(params.size());
+        std::vector<std::vector<uint8_t>> blobVals(params.size());
+
+        for (size_t i = 0; i < params.size(); ++i) {
+            isNulls.emplace_back(std::make_unique<bool>(false));
+            MYSQL_BIND& bind = binds[i];
+            std::memset(&bind, 0, sizeof(MYSQL_BIND));
+            bind.length = &lengths[i];
+            bind.is_null = isNulls[i].get();
+
+            const auto& value = params[i];
+            if (std::holds_alternative<std::monostate>(value)) {
+                *isNulls[i] = true;
+                bind.buffer_type = MYSQL_TYPE_NULL;
+                continue;
+            }
+
+            if (auto v = std::get_if<int>(&value)) {
+                i32Vals[i] = static_cast<int32_t>(*v);
+                bind.buffer_type = MYSQL_TYPE_LONG;
+                bind.buffer = &i32Vals[i];
+                bind.buffer_length = sizeof(i32Vals[i]);
+                continue;
+            }
+
+            if (auto v = std::get_if<int64_t>(&value)) {
+                i64Vals[i] = *v;
+                bind.buffer_type = MYSQL_TYPE_LONGLONG;
+                bind.buffer = &i64Vals[i];
+                bind.buffer_length = sizeof(i64Vals[i]);
+                continue;
+            }
+
+            if (auto v = std::get_if<double>(&value)) {
+                f64Vals[i] = *v;
+                bind.buffer_type = MYSQL_TYPE_DOUBLE;
+                bind.buffer = &f64Vals[i];
+                bind.buffer_length = sizeof(f64Vals[i]);
+                continue;
+            }
+
+            if (auto v = std::get_if<bool>(&value)) {
+                boolVals[i] = static_cast<int8_t>(*v ? 1 : 0);
+                bind.buffer_type = MYSQL_TYPE_TINY;
+                bind.buffer = &boolVals[i];
+                bind.buffer_length = sizeof(boolVals[i]);
+                continue;
+            }
+
+            if (auto v = std::get_if<std::string>(&value)) {
+                strVals[i] = *v;
+                lengths[i] = static_cast<unsigned long>(strVals[i].size());
+                bind.buffer_type = MYSQL_TYPE_STRING;
+                bind.buffer = strVals[i].empty() ? nullptr : strVals[i].data();
+                bind.buffer_length = lengths[i];
+                continue;
+            }
+
+            if (auto v = std::get_if<std::vector<uint8_t>>(&value)) {
+                blobVals[i] = *v;
+                lengths[i] = static_cast<unsigned long>(blobVals[i].size());
+                bind.buffer_type = MYSQL_TYPE_BLOB;
+                bind.buffer = blobVals[i].empty() ? nullptr : blobVals[i].data();
+                bind.buffer_length = lengths[i];
+                continue;
+            }
+        }
+
+        if (!binds.empty() && mysql_stmt_bind_param(stmt, binds.data()) != 0) {
+            lastErr_ = mysql_stmt_error(stmt);
+            spdlog::error("MySQL Bind Error: {} | SQL: {}", lastErr_, sql);
+            cleanupStmt();
+            return -1;
+        }
+
+        if (mysql_stmt_execute(stmt) != 0) {
+            lastErr_ = mysql_stmt_error(stmt);
+            spdlog::error("MySQL Stmt Execute Error: {} | SQL: {}", lastErr_, sql);
+            cleanupStmt();
+            return -1;
+        }
+
+        const auto affected = static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
+        cleanupStmt();
+        return affected;
     }
 
     bool begin() override { return execute("START TRANSACTION") >= 0; }
