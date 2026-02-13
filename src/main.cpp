@@ -57,7 +57,8 @@ int main() {
         if (mysqlConn->open()) {
             spdlog::info("MySQL Connected!");
 
-            mysqlConn->execute("CREATE TABLE IF NOT EXISTS test_tb (id BIGINT PRIMARY KEY, val VARCHAR(50), active TINYINT, payload BLOB)");
+            mysqlConn->execute("DROP TABLE IF EXISTS test_tb");
+            mysqlConn->execute("CREATE TABLE test_tb (id BIGINT PRIMARY KEY, val VARCHAR(255), active TINYINT, payload BLOB)");
             mysqlConn->execute("DELETE FROM test_tb WHERE id = 1");
 
             const int64_t affected = mysqlConn->execute(

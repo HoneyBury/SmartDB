@@ -63,8 +63,8 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
 namespace {
 
 bool mysqlTestEnabled() {
-    const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
-    return enabled != nullptr && std::string(enabled) == "1";
+    // const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
+    return true;
 }
 
 nlohmann::json mysqlConfigFromEnv() {
