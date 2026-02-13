@@ -2,6 +2,10 @@
 #include "cppsharp/my_lib.hpp"
 #include "sdb/types.hpp"
 #include "sdb/drivers/sqlite_driver.hpp"
+#include "sdb/drivers/mysql_driver.hpp"
+
+#include <cstdlib>
+#include <string>
 
 class MyLibTest : public ::testing::Test {
 protected:
@@ -53,4 +57,79 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
 
     auto payload = std::get<std::vector<uint8_t>>(rs->get("payload"));
     EXPECT_EQ(payload, blob);
+}
+
+
+namespace {
+
+bool mysqlTestEnabled() {
+    const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
+    return enabled != nullptr && std::string(enabled) == "1";
+}
+
+nlohmann::json mysqlConfigFromEnv() {
+    nlohmann::json cfg;
+    const auto read = [](const char* key, const char* fallback) {
+        const char* value = std::getenv(key);
+        return std::string(value ? value : fallback);
+    };
+
+    cfg["host"] = read("SMARTDB_MYSQL_HOST", "127.0.0.1");
+    cfg["port"] = std::stoi(read("SMARTDB_MYSQL_PORT", "3306"));
+    cfg["user"] = read("SMARTDB_MYSQL_USER", "root");
+    cfg["password"] = read("SMARTDB_MYSQL_PASSWORD", "root");
+    cfg["database"] = read("SMARTDB_MYSQL_DATABASE", "my_app");
+    cfg["charset"] = read("SMARTDB_MYSQL_CHARSET", "utf8mb4");
+    return cfg;
+}
+
+} // namespace
+
+TEST(MysqlDriverTest, ParameterizedInsertAndQueryTypes) {
+    if (!mysqlTestEnabled()) {
+        GTEST_SKIP() << "Set SMARTDB_MYSQL_TEST_ENABLE=1 to run MySQL integration tests.";
+    }
+
+    sdb::drivers::MysqlDriver driver;
+    auto conn = driver.createConnection(mysqlConfigFromEnv());
+
+    ASSERT_TRUE(conn->open()) << conn->lastError();
+    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS smartdb_mysql_test (id BIGINT PRIMARY KEY, name VARCHAR(64), enabled BIT(1), payload BLOB)"), 0) << conn->lastError();
+    ASSERT_GE(conn->execute("DELETE FROM smartdb_mysql_test WHERE id IN (1001, 1002)"), 0) << conn->lastError();
+
+    const std::vector<uint8_t> payload{0x00, 0x01, 0x7f, 0xff};
+    ASSERT_EQ(conn->execute(
+                  "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
+                  {int64_t{1001}, std::string("row-enabled"), true, payload}),
+              1)
+        << conn->lastError();
+
+    ASSERT_EQ(conn->execute(
+                  "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
+                  {int64_t{1002}, std::string("row-disabled"), false, payload}),
+              1)
+        << conn->lastError();
+
+    auto rs = conn->query("SELECT id, name, enabled, payload FROM smartdb_mysql_test WHERE id = 1002");
+    ASSERT_NE(rs, nullptr) << conn->lastError();
+    ASSERT_TRUE(rs->next());
+
+    EXPECT_EQ(std::get<int64_t>(rs->get("id")), 1002);
+    EXPECT_EQ(std::get<std::string>(rs->get("name")), "row-disabled");
+    EXPECT_FALSE(std::get<bool>(rs->get("enabled")));
+    EXPECT_EQ(std::get<std::vector<uint8_t>>(rs->get("payload")), payload);
+}
+
+TEST(MysqlDriverTest, ParameterCountMismatchShouldFail) {
+    if (!mysqlTestEnabled()) {
+        GTEST_SKIP() << "Set SMARTDB_MYSQL_TEST_ENABLE=1 to run MySQL integration tests.";
+    }
+
+    sdb::drivers::MysqlDriver driver;
+    auto conn = driver.createConnection(mysqlConfigFromEnv());
+
+    ASSERT_TRUE(conn->open()) << conn->lastError();
+
+    EXPECT_LT(conn->execute("INSERT INTO smartdb_mysql_test (id, name) VALUES (?, ?)", {int64_t{3001}}), 0);
+    EXPECT_NE(conn->lastError().find("parameter count mismatch"), std::string::npos);
 }
