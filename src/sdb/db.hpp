@@ -20,20 +20,20 @@ public:
         return inst;
     }
 
-    bool registerDriver(std::shared_ptr<IDriver> driver) {
+    DbResult<void> registerDriver(std::shared_ptr<IDriver> driver) {
         if (!driver) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "Driver is null";
-            return false;
+            return DbResult<void>::failure(lastError_);
         }
 
         std::lock_guard<std::mutex> lock(mtx_);
         drivers_[driver->name()] = std::move(driver);
         lastError_.clear();
-        return true;
+        return DbResult<void>::success();
     }
 
-    bool loadConfig(const std::string& filePath) {
+    DbResult<void> loadConfig(const std::string& filePath) {
         std::ifstream f(filePath);
         if (!f.is_open()) {
             {
@@ -41,7 +41,7 @@ public:
                 lastError_ = "Cannot open config file: " + filePath;
             }
             spdlog::error("Cannot open config file: {}", filePath);
-            return false;
+            return DbResult<void>::failure(lastError_);
         }
 
         try {
@@ -52,83 +52,83 @@ public:
                     lastError_ = "Invalid config file format: missing object key 'connections'";
                 }
                 spdlog::error("Invalid config file format: missing object key 'connections'");
-                return false;
+                return DbResult<void>::failure(lastError_);
             }
 
             std::lock_guard<std::mutex> lock(mtx_);
             configs_ = j["connections"];
             lastError_.clear();
             spdlog::info("Loaded {} connection configs.", configs_.size());
-            return true;
+            return DbResult<void>::success();
         } catch (const std::exception& e) {
             {
                 std::lock_guard<std::mutex> lock(mtx_);
                 lastError_ = std::string("JSON parse error: ") + e.what();
             }
             spdlog::error("JSON parse error: {}", e.what());
-            return false;
+            return DbResult<void>::failure(lastError_);
         }
     }
 
-    std::unique_ptr<IConnection> createConnection(const std::string& connectionName) {
+    DbResult<std::unique_ptr<IConnection>> createConnection(const std::string& connectionName) {
         std::lock_guard<std::mutex> lock(mtx_);
 
         if (!configs_.contains(connectionName)) {
             lastError_ = "Connection config not found: " + connectionName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
 
         const auto& config = configs_[connectionName];
         std::string driverName = config.value("driver", "");
         if (driverName.empty()) {
             lastError_ = "Missing required field 'driver' for connection: " + connectionName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
 
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
             lastError_ = "Driver not supported or registered: " + driverName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
 
         auto conn = it->second->createConnection(config);
         if (!conn) {
             lastError_ = "Driver factory returned null connection: " + driverName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
 
         lastError_.clear();
-        return conn;
+        return DbResult<std::unique_ptr<IConnection>>::success(std::move(conn));
     }
 
-    std::unique_ptr<IConnection> createConnectionRaw(const std::string& driverName, const nlohmann::json& config) {
+    DbResult<std::unique_ptr<IConnection>> createConnectionRaw(const std::string& driverName, const nlohmann::json& config) {
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
             lastError_ = "Driver not found: " + driverName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
         auto conn = it->second->createConnection(config);
         if (!conn) {
             lastError_ = "Driver factory returned null connection: " + driverName;
-            return {};
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
         }
 
         lastError_.clear();
-        return conn;
+        return DbResult<std::unique_ptr<IConnection>>::success(std::move(conn));
     }
 
-    std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName) {
+    DbResult<std::shared_ptr<ConnectionPool>> createPool(const std::string& connectionName) {
         return createPool(connectionName, ConnectionPool::Options{});
     }
 
-    std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName,
-                                               ConnectionPool::Options options) {
+    DbResult<std::shared_ptr<ConnectionPool>> createPool(const std::string& connectionName,
+                                                         ConnectionPool::Options options) {
         options = normalizeOptions(options);
         if (options.maxSize == 0) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "ConnectionPool maxSize must be greater than 0";
-            return {};
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
         }
 
         const auto key = poolKeyForName(connectionName, options);
@@ -137,48 +137,47 @@ public:
             auto cached = getCachedPoolLocked(key);
             if (cached) {
                 lastError_.clear();
-                return cached;
+                return DbResult<std::shared_ptr<ConnectionPool>>::success(cached);
             }
         }
 
         auto factory = [this, connectionName]() {
             return this->createConnection(connectionName);
         };
-        std::shared_ptr<ConnectionPool> pool;
-        try {
-            pool = ConnectionPool::createWithFactory(std::move(factory), options);
-        } catch (const std::exception& e) {
+        auto poolRes = ConnectionPool::createWithFactory(std::move(factory), options);
+        if (!poolRes) {
             std::lock_guard<std::mutex> lock(mtx_);
-            lastError_ = std::string("Create pool failed: ") + e.what();
-            return {};
+            lastError_ = poolRes.error().message;
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
         }
+        auto pool = std::move(poolRes.value());
 
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
                 lastError_.clear();
-                return cached;
+                return DbResult<std::shared_ptr<ConnectionPool>>::success(cached);
             }
             poolCache_[key] = pool;
             lastError_.clear();
         }
-        return pool;
+        return DbResult<std::shared_ptr<ConnectionPool>>::success(std::move(pool));
     }
 
-    std::shared_ptr<ConnectionPool> createPoolRaw(const std::string& driverName,
-                                                  const nlohmann::json& config) {
+    DbResult<std::shared_ptr<ConnectionPool>> createPoolRaw(const std::string& driverName,
+                                                            const nlohmann::json& config) {
         return createPoolRaw(driverName, config, ConnectionPool::Options{});
     }
 
-    std::shared_ptr<ConnectionPool> createPoolRaw(const std::string& driverName,
-                                                  const nlohmann::json& config,
-                                                  ConnectionPool::Options options) {
+    DbResult<std::shared_ptr<ConnectionPool>> createPoolRaw(const std::string& driverName,
+                                                            const nlohmann::json& config,
+                                                            ConnectionPool::Options options) {
         options = normalizeOptions(options);
         if (options.maxSize == 0) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "ConnectionPool maxSize must be greater than 0";
-            return {};
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
         }
 
         const auto key = poolKeyForRaw(driverName, config, options);
@@ -187,37 +186,36 @@ public:
             auto cached = getCachedPoolLocked(key);
             if (cached) {
                 lastError_.clear();
-                return cached;
+                return DbResult<std::shared_ptr<ConnectionPool>>::success(cached);
             }
             if (drivers_.find(driverName) == drivers_.end()) {
                 lastError_ = "Driver not found: " + driverName;
-                return {};
+                return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
             }
         }
 
         auto factory = [this, driverName, config]() {
             return this->createConnectionRaw(driverName, config);
         };
-        std::shared_ptr<ConnectionPool> pool;
-        try {
-            pool = ConnectionPool::createWithFactory(std::move(factory), options);
-        } catch (const std::exception& e) {
+        auto poolRes = ConnectionPool::createWithFactory(std::move(factory), options);
+        if (!poolRes) {
             std::lock_guard<std::mutex> lock(mtx_);
-            lastError_ = std::string("Create pool failed: ") + e.what();
-            return {};
+            lastError_ = poolRes.error().message;
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
         }
+        auto pool = std::move(poolRes.value());
 
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
                 lastError_.clear();
-                return cached;
+                return DbResult<std::shared_ptr<ConnectionPool>>::success(cached);
             }
             poolCache_[key] = pool;
             lastError_.clear();
         }
-        return pool;
+        return DbResult<std::shared_ptr<ConnectionPool>>::success(std::move(pool));
     }
 
     std::string lastError() const {

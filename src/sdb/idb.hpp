@@ -27,25 +27,23 @@ class IConnection {
 public:
  virtual ~IConnection() = default;
 
- virtual bool open() = 0;
+ virtual DbResult<void> open() = 0;
  virtual void close() = 0;
  virtual bool isOpen() const = 0;
 
  // 基础执行
  // query: 用于 SELECT, 返回结果集
- virtual std::shared_ptr<IResultSet> query(const std::string& sql) = 0;
+ virtual DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) = 0;
  // execute: 用于 INSERT/UPDATE/DELETE, 返回受影响行数
- virtual int64_t execute(const std::string& sql) = 0;
+ virtual DbResult<int64_t> execute(const std::string& sql) = 0;
 
  // 预编译执行 (参数化查询，防止注入)
- virtual int64_t execute(const std::string& sql, const std::vector<DbValue>& params) = 0;
+ virtual DbResult<int64_t> execute(const std::string& sql, const std::vector<DbValue>& params) = 0;
 
  // 事务支持
- virtual bool begin() = 0;
- virtual bool commit() = 0;
- virtual bool rollback() = 0;
-
- virtual std::string lastError() const = 0;
+ virtual DbResult<void> begin() = 0;
+ virtual DbResult<void> commit() = 0;
+ virtual DbResult<void> rollback() = 0;
 };
 
 // 驱动工厂接口

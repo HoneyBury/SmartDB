@@ -128,15 +128,15 @@ public:
 
     ~MysqlConnection() override { close(); }
 
-    bool open() override {
+    DbResult<void> open() override {
         if (isOpen()) {
-            return true;
+            return DbResult<void>::success();
         }
 
         conn_ = mysql_init(nullptr);
         if (!conn_) {
             lastErr_ = "mysql_init failed: out of memory";
-            return false;
+            return DbResult<void>::failure(lastErr_);
         }
 
         const std::string host = config_.value("host", "127.0.0.1");
@@ -154,13 +154,14 @@ public:
                                 pass.c_str(), db.empty() ? nullptr : db.c_str(),
                                 port, nullptr, 0)) {
             lastErr_ = mysql_error(conn_);
+            const int errCode = mysql_errno(conn_);
             mysql_close(conn_);
             conn_ = nullptr;
-            return false;
+            return DbResult<void>::failure(lastErr_, errCode);
         }
 
         lastErr_.clear();
-        return true;
+        return DbResult<void>::success();
     }
 
     void close() override {
@@ -172,16 +173,16 @@ public:
 
     bool isOpen() const override { return conn_ != nullptr; }
 
-    std::shared_ptr<IResultSet> query(const std::string& sql) override {
+    DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return nullptr;
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
         }
 
         if (mysql_query(conn_, sql.c_str())) {
             lastErr_ = mysql_error(conn_);
             spdlog::error("MySQL Query Error: {} | SQL: {}", lastErr_, sql);
-            return nullptr;
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_));
         }
 
         MYSQL_RES* res = mysql_store_result(conn_);
@@ -189,39 +190,41 @@ public:
             if (mysql_field_count(conn_) > 0) {
                 lastErr_ = mysql_error(conn_);
                 spdlog::error("MySQL Store Result Error: {}", lastErr_);
-                return nullptr;
+                return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_));
             }
-            return std::make_shared<MysqlResultSet>(nullptr);
+            return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<MysqlResultSet>(nullptr));
         }
 
-        return std::make_shared<MysqlResultSet>(res);
+        lastErr_.clear();
+        return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<MysqlResultSet>(res));
     }
 
-    int64_t execute(const std::string& sql) override {
+    DbResult<int64_t> execute(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_);
         }
 
         if (mysql_query(conn_, sql.c_str())) {
             lastErr_ = mysql_error(conn_);
             spdlog::error("MySQL Execute Error: {} | SQL: {}", lastErr_, sql);
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_));
         }
 
-        return static_cast<int64_t>(mysql_affected_rows(conn_));
+        lastErr_.clear();
+        return DbResult<int64_t>::success(static_cast<int64_t>(mysql_affected_rows(conn_)));
     }
 
-    int64_t execute(const std::string& sql, const std::vector<DbValue>& params) override {
+    DbResult<int64_t> execute(const std::string& sql, const std::vector<DbValue>& params) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_);
         }
 
         MYSQL_STMT* stmt = mysql_stmt_init(conn_);
         if (!stmt) {
             lastErr_ = "mysql_stmt_init failed";
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_));
         }
 
         auto cleanupStmt = [&stmt]() {
@@ -234,8 +237,9 @@ public:
         if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.size())) != 0) {
             lastErr_ = mysql_stmt_error(stmt);
             spdlog::error("MySQL Prepare Error: {} | SQL: {}", lastErr_, sql);
+            const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, errCode);
         }
 
         const auto expectedParams = mysql_stmt_param_count(stmt);
@@ -243,7 +247,7 @@ public:
             lastErr_ = "parameter count mismatch: expected " + std::to_string(expectedParams) +
                        ", got " + std::to_string(params.size());
             cleanupStmt();
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_);
         }
 
         std::vector<MYSQL_BIND> binds(params.size());
@@ -325,27 +329,48 @@ public:
         if (!binds.empty() && mysql_stmt_bind_param(stmt, binds.data()) != 0) {
             lastErr_ = mysql_stmt_error(stmt);
             spdlog::error("MySQL Bind Error: {} | SQL: {}", lastErr_, sql);
+            const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, errCode);
         }
 
         if (mysql_stmt_execute(stmt) != 0) {
             lastErr_ = mysql_stmt_error(stmt);
             spdlog::error("MySQL Stmt Execute Error: {} | SQL: {}", lastErr_, sql);
+            const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, errCode);
         }
 
         const auto affected = static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
         cleanupStmt();
-        return affected;
+        lastErr_.clear();
+        return DbResult<int64_t>::success(affected);
     }
 
-    bool begin() override { return execute("START TRANSACTION") >= 0; }
-    bool commit() override { return execute("COMMIT") >= 0; }
-    bool rollback() override { return execute("ROLLBACK") >= 0; }
+    DbResult<void> begin() override {
+        auto res = execute("START TRANSACTION");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
 
-    std::string lastError() const override { return lastErr_; }
+    DbResult<void> commit() override {
+        auto res = execute("COMMIT");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
+
+    DbResult<void> rollback() override {
+        auto res = execute("ROLLBACK");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
 };
 
 class MysqlDriver : public IDriver {

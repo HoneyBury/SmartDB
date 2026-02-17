@@ -47,13 +47,13 @@ jobs:
         run: conan install . -of build/Release --build=missing -s build_type=Release
 
       - name: Configure CMake
-        run: cmake --preset conan-release -DBUILD_TESTING=OFF
+        run: cmake --preset conan-default -DBUILD_TESTING=OFF
 
       - name: Build project
-        run: cmake --build --preset conan-release
+        run: cmake --build --preset conan-default
 
       - name: Create package with CPack
-        run: cmake --build --preset conan-release --target package
+        run: cmake --build --preset conan-default --target package
 
       - name: Stage Artifact
         shell: bash

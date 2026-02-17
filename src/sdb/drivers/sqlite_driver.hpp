@@ -85,18 +85,19 @@ public:
     explicit SqliteConnection(std::string str) : connStr_(std::move(str)) {}
     ~SqliteConnection() override { close(); }
 
-    bool open() override {
+    DbResult<void> open() override {
         if (isOpen()) {
-            return true;
+            return DbResult<void>::success();
         }
 
         const int rc = sqlite3_open(connStr_.c_str(), &db_);
         if (rc != SQLITE_OK) {
             lastErr_ = sqlite3_errmsg(db_ ? db_ : nullptr);
             close();
-            return false;
+            return DbResult<void>::failure(lastErr_, rc);
         }
-        return true;
+        lastErr_.clear();
+        return DbResult<void>::success();
     }
 
     void close() override {
@@ -108,55 +109,60 @@ public:
 
     bool isOpen() const override { return db_ != nullptr; }
 
-    std::shared_ptr<IResultSet> query(const std::string& sql) override {
+    DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return nullptr;
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
         }
 
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        const int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
             lastErr_ = sqlite3_errmsg(db_);
             spdlog::error("SQLite query prepare failed: {}", lastErr_);
             if (stmt) {
                 sqlite3_finalize(stmt);
             }
-            return nullptr;
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, rc);
         }
-        return std::make_shared<SqliteResultSet>(stmt);
+        lastErr_.clear();
+        return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<SqliteResultSet>(stmt));
     }
 
-    int64_t execute(const std::string& sql) override {
+    DbResult<int64_t> execute(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_);
         }
 
         char* err = nullptr;
-        if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+        const int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
+        if (rc != SQLITE_OK) {
             lastErr_ = err ? err : "Unknown error";
             sqlite3_free(err);
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, rc);
         }
-        return sqlite3_changes(db_);
+        lastErr_.clear();
+        return DbResult<int64_t>::success(sqlite3_changes(db_));
     }
 
-    int64_t execute(const std::string& sql, const std::vector<DbValue>& params) override {
+    DbResult<int64_t> execute(const std::string& sql, const std::vector<DbValue>& params) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_);
         }
 
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
             lastErr_ = sqlite3_errmsg(db_);
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, rc);
         }
 
         for (size_t i = 0; i < params.size(); ++i) {
             const int bindIndex = static_cast<int>(i + 1);
             const auto& p = params[i];
-            int rc = SQLITE_OK;
+            rc = SQLITE_OK;
 
             if (std::holds_alternative<std::monostate>(p)) {
                 rc = sqlite3_bind_null(stmt, bindIndex);
@@ -179,24 +185,45 @@ public:
             if (rc != SQLITE_OK) {
                 lastErr_ = sqlite3_errmsg(db_);
                 sqlite3_finalize(stmt);
-                return -1;
+                return DbResult<int64_t>::failure(lastErr_, rc);
             }
         }
 
-        if (sqlite3_step(stmt) != SQLITE_DONE) {
+        rc = sqlite3_step(stmt);
+        if (rc != SQLITE_DONE) {
             lastErr_ = sqlite3_errmsg(db_);
             sqlite3_finalize(stmt);
-            return -1;
+            return DbResult<int64_t>::failure(lastErr_, rc);
         }
 
         sqlite3_finalize(stmt);
-        return sqlite3_changes(db_);
+        lastErr_.clear();
+        return DbResult<int64_t>::success(sqlite3_changes(db_));
     }
 
-    bool begin() override { return execute("BEGIN") >= 0; }
-    bool commit() override { return execute("COMMIT") >= 0; }
-    bool rollback() override { return execute("ROLLBACK") >= 0; }
-    std::string lastError() const override { return lastErr_; }
+    DbResult<void> begin() override {
+        auto res = execute("BEGIN");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
+
+    DbResult<void> commit() override {
+        auto res = execute("COMMIT");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
+
+    DbResult<void> rollback() override {
+        auto res = execute("ROLLBACK");
+        if (!res) {
+            return DbResult<void>::failure(res.error().message, res.error().code);
+        }
+        return DbResult<void>::success();
+    }
 };
 
 class SqliteDriver : public IDriver {

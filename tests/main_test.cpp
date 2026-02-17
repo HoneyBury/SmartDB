@@ -48,19 +48,23 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
     sdb::drivers::SqliteDriver driver;
     auto conn = driver.createConnection({{"path", ":memory:"}});
 
-    ASSERT_TRUE(conn->open());
-    ASSERT_GE(conn->execute("CREATE TABLE demo (id INTEGER, name TEXT, payload BLOB)"), 0);
+    auto openRes = conn->open();
+    ASSERT_TRUE(openRes) << openRes.error().message;
+    auto createRes = conn->execute("CREATE TABLE demo (id INTEGER, name TEXT, payload BLOB)");
+    ASSERT_TRUE(createRes) << createRes.error().message;
 
     std::vector<uint8_t> blob{0x41, 0x42, 0x43};
-    const int64_t affected = conn->execute(
+    auto affectedRes = conn->execute(
         "INSERT INTO demo (id, name, payload) VALUES (?, ?, ?)",
         {int64_t{7}, std::string("smartdb"), blob}
     );
-    ASSERT_EQ(affected, 1);
+    ASSERT_TRUE(affectedRes) << affectedRes.error().message;
+    ASSERT_EQ(affectedRes.value(), 1);
 
-    auto rs = conn->query("SELECT id, name, payload FROM demo LIMIT 1");
-    ASSERT_NE(rs, nullptr);
-    ASSERT_TRUE(rs->next());
+    auto rsRes = conn->query("SELECT id, name, payload FROM demo LIMIT 1");
+    ASSERT_TRUE(rsRes) << rsRes.error().message;
+    auto rs = rsRes.value();
+    ASSERT_TRUE(rs && rs->next());
 
     EXPECT_EQ(std::get<int64_t>(rs->get("id")), 7);
     EXPECT_EQ(std::get<std::string>(rs->get("name")), "smartdb");
@@ -76,17 +80,21 @@ TEST(ConnectionPoolTest, ReusesSingleConnection) {
     options.minSize = 0;
     options.waitTimeout = std::chrono::milliseconds(0);
 
-    auto pool = sdb::ConnectionPool::createWithFactory(
-        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(driver->createConnection({{"path", ":memory:"}})); },
         options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
 
-    auto conn1 = pool->acquire();
-    ASSERT_TRUE(conn1);
+    auto conn1Res = pool->acquire();
+    ASSERT_TRUE(conn1Res) << conn1Res.error().message;
+    auto conn1 = std::move(conn1Res.value());
     auto* firstPtr = conn1.get();
     conn1.reset();
 
-    auto conn2 = pool->acquire();
-    ASSERT_TRUE(conn2);
+    auto conn2Res = pool->acquire();
+    ASSERT_TRUE(conn2Res) << conn2Res.error().message;
+    auto conn2 = std::move(conn2Res.value());
     EXPECT_EQ(conn2.get(), firstPtr);
 }
 
@@ -97,16 +105,19 @@ TEST(ConnectionPoolTest, ExhaustedPoolTimesOut) {
     options.minSize = 0;
     options.waitTimeout = std::chrono::milliseconds(50);
 
-    auto pool = sdb::ConnectionPool::createWithFactory(
-        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(driver->createConnection({{"path", ":memory:"}})); },
         options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
 
-    auto conn1 = pool->acquire();
-    ASSERT_TRUE(conn1);
+    auto conn1Res = pool->acquire();
+    ASSERT_TRUE(conn1Res) << conn1Res.error().message;
+    auto conn1 = std::move(conn1Res.value());
 
-    auto conn2 = pool->acquire();
-    EXPECT_FALSE(conn2);
-    EXPECT_NE(pool->lastError().find("timed out"), std::string::npos);
+    auto conn2Res = pool->acquire();
+    EXPECT_FALSE(conn2Res);
+    EXPECT_NE(conn2Res.error().message.find("timed out"), std::string::npos);
     EXPECT_LE(pool->totalSize(), options.maxSize);
 }
 
@@ -117,9 +128,11 @@ TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
     options.minSize = 0;
     options.waitTimeout = std::chrono::milliseconds(500);
 
-    auto pool = sdb::ConnectionPool::createWithFactory(
-        [driver]() { return driver->createConnection({{"path", ":memory:"}}); },
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() { return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(driver->createConnection({{"path", ":memory:"}})); },
         options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
 
     std::atomic<int> current{0};
     std::atomic<int> failures{0};
@@ -130,11 +143,12 @@ TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
 
     for (int i = 0; i < 12; ++i) {
         threads.emplace_back([&]() {
-            auto conn = pool->acquire();
-            if (!conn) {
+            auto connRes = pool->acquire();
+            if (!connRes) {
                 ++failures;
                 return;
             }
+            auto conn = std::move(connRes.value());
             const int inUse = ++current;
             {
                 std::lock_guard<std::mutex> lock(maxMtx);
@@ -159,7 +173,8 @@ TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
     sdb::DatabaseManager manager;
-    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    ASSERT_TRUE(regRes) << regRes.error().message;
 
     nlohmann::json j;
     j["connections"]["pool_sqlite"] = {
@@ -175,58 +190,74 @@ TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
         out << j.dump(2);
     }
 
-    ASSERT_TRUE(manager.loadConfig(path.string()));
+    auto loadRes = manager.loadConfig(path.string());
+    ASSERT_TRUE(loadRes) << loadRes.error().message;
 
     sdb::ConnectionPool::Options options;
     options.maxSize = 2;
     options.waitTimeout = std::chrono::milliseconds(200);
 
-    auto pool = manager.createPool("pool_sqlite", options);
-    auto poolAgain = manager.createPool("pool_sqlite", options);
+    auto poolRes = manager.createPool("pool_sqlite", options);
+    auto poolAgainRes = manager.createPool("pool_sqlite", options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    ASSERT_TRUE(poolAgainRes) << poolAgainRes.error().message;
+    auto pool = poolRes.value();
+    auto poolAgain = poolAgainRes.value();
     ASSERT_EQ(pool.get(), poolAgain.get());
 
-    auto conn = pool->acquire();
-    ASSERT_TRUE(conn);
+    auto connRes = pool->acquire();
+    ASSERT_TRUE(connRes) << connRes.error().message;
+    auto conn = std::move(connRes.value());
     ASSERT_TRUE(conn->isOpen());
-    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS pool_demo (id INTEGER)"), 0);
+    auto execRes = conn->execute("CREATE TABLE IF NOT EXISTS pool_demo (id INTEGER)");
+    ASSERT_TRUE(execRes) << execRes.error().message;
 
     std::filesystem::remove(path);
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerRaw) {
     sdb::DatabaseManager manager;
-    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    ASSERT_TRUE(regRes) << regRes.error().message;
 
     sdb::ConnectionPool::Options options;
     options.maxSize = 1;
     options.waitTimeout = std::chrono::milliseconds(100);
 
-    auto pool = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
-    auto conn = pool->acquire();
-    ASSERT_TRUE(conn);
+    auto poolRes = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
+    auto connRes = pool->acquire();
+    ASSERT_TRUE(connRes) << connRes.error().message;
+    auto conn = std::move(connRes.value());
     ASSERT_TRUE(conn->isOpen());
-    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS pool_raw (id INTEGER)"), 0);
+    auto execRes = conn->execute("CREATE TABLE IF NOT EXISTS pool_raw (id INTEGER)");
+    ASSERT_TRUE(execRes) << execRes.error().message;
 }
 
 TEST(ConnectionPoolTest, DatabaseManagerPoolCacheReuseSameOptions) {
     sdb::DatabaseManager manager;
-    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    ASSERT_TRUE(regRes) << regRes.error().message;
 
     sdb::ConnectionPool::Options options;
     options.maxSize = 2;
     options.waitTimeout = std::chrono::milliseconds(100);
 
-    auto pool1 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
-    auto pool2 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+    auto pool1Res = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
+    auto pool2Res = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, options);
 
-    ASSERT_TRUE(pool1);
-    ASSERT_TRUE(pool2);
+    ASSERT_TRUE(pool1Res) << pool1Res.error().message;
+    ASSERT_TRUE(pool2Res) << pool2Res.error().message;
+    auto pool1 = pool1Res.value();
+    auto pool2 = pool2Res.value();
     EXPECT_EQ(pool1.get(), pool2.get());
 }
 
 TEST(ConnectionPoolTest, DatabaseManagerPoolCacheSeparatesOptions) {
     sdb::DatabaseManager manager;
-    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    ASSERT_TRUE(regRes) << regRes.error().message;
 
     sdb::ConnectionPool::Options optionsA;
     optionsA.maxSize = 1;
@@ -235,28 +266,31 @@ TEST(ConnectionPoolTest, DatabaseManagerPoolCacheSeparatesOptions) {
     sdb::ConnectionPool::Options optionsB = optionsA;
     optionsB.maxSize = 2;
 
-    auto pool1 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsA);
-    auto pool2 = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsB);
+    auto pool1Res = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsA);
+    auto pool2Res = manager.createPoolRaw("sqlite", {{"path", ":memory:"}}, optionsB);
 
-    ASSERT_TRUE(pool1);
-    ASSERT_TRUE(pool2);
+    ASSERT_TRUE(pool1Res) << pool1Res.error().message;
+    ASSERT_TRUE(pool2Res) << pool2Res.error().message;
+    auto pool1 = pool1Res.value();
+    auto pool2 = pool2Res.value();
     EXPECT_NE(pool1.get(), pool2.get());
 }
 
 TEST(DatabaseManagerTest, MissingConfigUsesLastErrorInsteadOfException) {
     sdb::DatabaseManager manager;
-    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>()));
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    ASSERT_TRUE(regRes) << regRes.error().message;
 
-    auto conn = manager.createConnection("missing_name");
-    EXPECT_FALSE(conn);
-    EXPECT_NE(manager.lastError().find("Connection config not found"), std::string::npos);
+    auto connRes = manager.createConnection("missing_name");
+    EXPECT_FALSE(connRes);
+    EXPECT_NE(connRes.error().message.find("Connection config not found"), std::string::npos);
 }
 
 TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {
     sdb::DatabaseManager manager;
-    auto pool = manager.createPoolRaw("unknown_driver", {{"path", ":memory:"}});
-    EXPECT_FALSE(pool);
-    EXPECT_NE(manager.lastError().find("Driver not found"), std::string::npos);
+    auto poolRes = manager.createPoolRaw("unknown_driver", {{"path", ":memory:"}});
+    EXPECT_FALSE(poolRes);
+    EXPECT_NE(poolRes.error().message.find("Driver not found"), std::string::npos);
 }
 
 
@@ -297,26 +331,30 @@ TEST(MysqlDriverTest, ParameterizedInsertAndQueryTypes) {
     sdb::drivers::MysqlDriver driver;
     auto conn = driver.createConnection(mysqlConfigFromEnv());
 
-    ASSERT_TRUE(conn->open()) << conn->lastError();
-    ASSERT_GE(conn->execute("CREATE TABLE IF NOT EXISTS smartdb_mysql_test (id BIGINT PRIMARY KEY, name VARCHAR(64), enabled BIT(1), payload BLOB)"), 0) << conn->lastError();
-    ASSERT_GE(conn->execute("DELETE FROM smartdb_mysql_test WHERE id IN (1001, 1002)"), 0) << conn->lastError();
+    auto openRes = conn->open();
+    ASSERT_TRUE(openRes) << openRes.error().message;
+    auto createRes = conn->execute("CREATE TABLE IF NOT EXISTS smartdb_mysql_test (id BIGINT PRIMARY KEY, name VARCHAR(64), enabled BIT(1), payload BLOB)");
+    ASSERT_TRUE(createRes) << createRes.error().message;
+    auto cleanupRes = conn->execute("DELETE FROM smartdb_mysql_test WHERE id IN (1001, 1002)");
+    ASSERT_TRUE(cleanupRes) << cleanupRes.error().message;
 
     const std::vector<uint8_t> payload{0x00, 0x01, 0x7f, 0xff};
-    ASSERT_EQ(conn->execute(
-                  "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
-                  {int64_t{1001}, std::string("row-enabled"), true, payload}),
-              1)
-        << conn->lastError();
+    auto ins1 = conn->execute(
+        "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
+        {int64_t{1001}, std::string("row-enabled"), true, payload});
+    ASSERT_TRUE(ins1) << ins1.error().message;
+    ASSERT_EQ(ins1.value(), 1);
 
-    ASSERT_EQ(conn->execute(
-                  "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
-                  {int64_t{1002}, std::string("row-disabled"), false, payload}),
-              1)
-        << conn->lastError();
+    auto ins2 = conn->execute(
+        "INSERT INTO smartdb_mysql_test (id, name, enabled, payload) VALUES (?, ?, ?, ?)",
+        {int64_t{1002}, std::string("row-disabled"), false, payload});
+    ASSERT_TRUE(ins2) << ins2.error().message;
+    ASSERT_EQ(ins2.value(), 1);
 
-    auto rs = conn->query("SELECT id, name, enabled, payload FROM smartdb_mysql_test WHERE id = 1002");
-    ASSERT_NE(rs, nullptr) << conn->lastError();
-    ASSERT_TRUE(rs->next());
+    auto rsRes = conn->query("SELECT id, name, enabled, payload FROM smartdb_mysql_test WHERE id = 1002");
+    ASSERT_TRUE(rsRes) << rsRes.error().message;
+    auto rs = rsRes.value();
+    ASSERT_TRUE(rs && rs->next());
 
     EXPECT_EQ(std::get<int64_t>(rs->get("id")), 1002);
     EXPECT_EQ(std::get<std::string>(rs->get("name")), "row-disabled");
@@ -332,10 +370,12 @@ TEST(MysqlDriverTest, ParameterCountMismatchShouldFail) {
     sdb::drivers::MysqlDriver driver;
     auto conn = driver.createConnection(mysqlConfigFromEnv());
 
-    ASSERT_TRUE(conn->open()) << conn->lastError();
+    auto openRes = conn->open();
+    ASSERT_TRUE(openRes) << openRes.error().message;
 
-    EXPECT_LT(conn->execute("INSERT INTO smartdb_mysql_test (id, name) VALUES (?, ?)", {int64_t{3001}}), 0);
-    EXPECT_NE(conn->lastError().find("parameter count mismatch"), std::string::npos);
+    auto execRes = conn->execute("INSERT INTO smartdb_mysql_test (id, name) VALUES (?, ?)", {int64_t{3001}});
+    EXPECT_FALSE(execRes);
+    EXPECT_NE(execRes.error().message.find("parameter count mismatch"), std::string::npos);
 }
 
 TEST(MysqlDriverTest, OpenCloseShouldBeIdempotent) {
@@ -346,8 +386,10 @@ TEST(MysqlDriverTest, OpenCloseShouldBeIdempotent) {
     sdb::drivers::MysqlDriver driver;
     auto conn = driver.createConnection(mysqlConfigFromEnv());
 
-    ASSERT_TRUE(conn->open()) << conn->lastError();
-    ASSERT_TRUE(conn->open()) << conn->lastError();
+    auto open1 = conn->open();
+    ASSERT_TRUE(open1) << open1.error().message;
+    auto open2 = conn->open();
+    ASSERT_TRUE(open2) << open2.error().message;
     ASSERT_TRUE(conn->isOpen());
 
     conn->close();

@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <optional>
+#include <utility>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 
@@ -19,6 +20,59 @@ using DbValue = std::variant<
     std::string,            // Text/Varchar
     std::vector<uint8_t>    // Blob/Binary
 >;
+
+struct DbError {
+ int code = 0;
+ std::string message;
+};
+
+template <typename T>
+class DbResult {
+public:
+ static DbResult success(T value) {
+     return DbResult(std::move(value));
+ }
+
+ static DbResult failure(std::string message, int code = 0) {
+     return DbResult(DbError{code, std::move(message)});
+ }
+
+ bool ok() const { return value_.has_value(); }
+ explicit operator bool() const { return ok(); }
+
+ const T& value() const { return *value_; }
+ T& value() { return *value_; }
+
+ const DbError& error() const { return error_; }
+
+private:
+ explicit DbResult(T value) : value_(std::move(value)) {}
+ explicit DbResult(DbError error) : value_(std::nullopt), error_(std::move(error)) {}
+
+ std::optional<T> value_;
+ DbError error_{};
+};
+
+template <>
+class DbResult<void> {
+public:
+ static DbResult success() { return DbResult(true, {}); }
+
+ static DbResult failure(std::string message, int code = 0) {
+     return DbResult(false, DbError{code, std::move(message)});
+ }
+
+ bool ok() const { return ok_; }
+ explicit operator bool() const { return ok(); }
+
+ const DbError& error() const { return error_; }
+
+private:
+ DbResult(bool ok, DbError error) : ok_(ok), error_(std::move(error)) {}
+
+ bool ok_ = false;
+ DbError error_{};
+};
 
 // 辅助函数：判断是否为空
 inline bool isNull(const DbValue& v) {

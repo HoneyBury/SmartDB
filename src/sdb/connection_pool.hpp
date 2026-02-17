@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,21 +36,33 @@ public:
     };
 
     using Handle = std::unique_ptr<IConnection, ReturnToPool>;
-    using Factory = std::function<std::unique_ptr<IConnection>()>;
+    using Factory = std::function<DbResult<std::unique_ptr<IConnection>>()>;
 
-    static std::shared_ptr<ConnectionPool> createWithFactory(Factory factory) {
+    static DbResult<std::shared_ptr<ConnectionPool>> createWithFactory(Factory factory) {
         return createWithFactory(std::move(factory), Options{});
     }
 
-    static std::shared_ptr<ConnectionPool> createWithFactory(Factory factory, Options options) {
-        return std::shared_ptr<ConnectionPool>(new ConnectionPool(std::move(factory), options));
+    static DbResult<std::shared_ptr<ConnectionPool>> createWithFactory(Factory factory, Options options) {
+        if (!factory) {
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure("ConnectionPool requires a valid factory");
+        }
+        if (options.maxSize == 0) {
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure("ConnectionPool maxSize must be greater than 0");
+        }
+        if (options.minSize > options.maxSize) {
+            options.minSize = options.maxSize;
+        }
+
+        auto pool = std::shared_ptr<ConnectionPool>(new ConnectionPool(std::move(factory), options));
+        return DbResult<std::shared_ptr<ConnectionPool>>::success(std::move(pool));
     }
 
-    Handle acquire() {
+    DbResult<Handle> acquire() {
         std::unique_lock<std::mutex> lock(mtx_);
         if (closed_) {
-            lastError_ = "Connection pool is closed";
-            return {};
+            const std::string error = "Connection pool is closed";
+            lastError_ = error;
+            return DbResult<Handle>::failure(error);
         }
 
         const auto deadline = std::chrono::steady_clock::now() + options_.waitTimeout;
@@ -70,11 +81,11 @@ public:
                     cv_.notify_one();
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
-                        return {};
+                        return DbResult<Handle>::failure(lastError_);
                     }
                     continue;
                 }
-                return wrap(std::move(conn));
+                return DbResult<Handle>::success(wrap(std::move(conn)));
             }
 
             if (total_ < options_.maxSize) {
@@ -90,10 +101,10 @@ public:
                         lastError_ = "Connection factory returned null";
                     }
                     cv_.notify_one();
-                    return {};
+                    return DbResult<Handle>::failure(lastError_);
                 }
-                if (options_.testOnBorrow && !ensureOpen(*conn)) {
-                    conn->close();
+                if (options_.testOnBorrow && !ensureOpen(*conn.value())) {
+                    conn.value()->close();
                     lock.lock();
                     if (total_ > 0) {
                         --total_;
@@ -101,21 +112,23 @@ public:
                     cv_.notify_one();
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
-                        return {};
+                        return DbResult<Handle>::failure(lastError_);
                     }
                     continue;
                 }
-                return wrap(std::move(conn));
+                return DbResult<Handle>::success(wrap(std::move(conn.value())));
             }
 
             if (options_.waitTimeout.count() == 0) {
-                lastError_ = "Connection pool exhausted";
-                return {};
+                const std::string error = "Connection pool exhausted";
+                lastError_ = error;
+                return DbResult<Handle>::failure(error);
             }
 
             if (cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
-                lastError_ = "Connection pool acquire timed out";
-                return {};
+                const std::string error = "Connection pool acquire timed out";
+                lastError_ = error;
+                return DbResult<Handle>::failure(error);
             }
         }
     }
@@ -171,16 +184,6 @@ public:
 
 private:
     ConnectionPool(Factory factory, Options options) : factory_(std::move(factory)), options_(options) {
-        if (!factory_) {
-            throw std::invalid_argument("ConnectionPool requires a valid factory");
-        }
-        if (options_.maxSize == 0) {
-            throw std::invalid_argument("ConnectionPool maxSize must be greater than 0");
-        }
-        if (options_.minSize > options_.maxSize) {
-            options_.minSize = options_.maxSize;
-        }
-
         idle_.reserve(options_.maxSize);
 
         for (size_t i = 0; i < options_.minSize; ++i) {
@@ -188,11 +191,11 @@ private:
             if (!conn) {
                 continue;
             }
-            if (options_.testOnBorrow && !ensureOpen(*conn)) {
-                conn->close();
+            if (options_.testOnBorrow && !ensureOpen(*conn.value())) {
+                conn.value()->close();
                 continue;
             }
-            idle_.push_back(std::move(conn));
+            idle_.push_back(std::move(conn.value()));
             ++total_;
         }
     }
@@ -225,23 +228,29 @@ private:
         cv_.notify_one();
     }
 
-    std::unique_ptr<IConnection> createConnection() {
+    DbResult<std::unique_ptr<IConnection>> createConnection() {
         try {
-            return factory_();
+            auto conn = factory_();
+            if (!conn) {
+                setError(conn.error().message.empty() ? "Connection factory returned null" : conn.error().message);
+                return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            }
+            return conn;
         } catch (const std::exception& e) {
             setError(std::string("Connection factory error: ") + e.what());
         } catch (...) {
             setError("Connection factory error: unknown exception");
         }
-        return {};
+        return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
     }
 
     bool ensureOpen(IConnection& conn) {
         if (conn.isOpen()) {
             return true;
         }
-        if (!conn.open()) {
-            setError(conn.lastError());
+        auto openRes = conn.open();
+        if (!openRes) {
+            setError(openRes.error().message);
             return false;
         }
         return true;
