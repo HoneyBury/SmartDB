@@ -129,6 +129,10 @@ public:
     ~MysqlConnection() override { close(); }
 
     bool open() override {
+        if (isOpen()) {
+            return true;
+        }
+
         conn_ = mysql_init(nullptr);
         if (!conn_) {
             lastErr_ = "mysql_init failed: out of memory";
@@ -155,6 +159,7 @@ public:
             return false;
         }
 
+        lastErr_.clear();
         return true;
     }
 

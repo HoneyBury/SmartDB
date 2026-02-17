@@ -2,8 +2,8 @@
 
 # 1. 设置CMake最低版本和项目信息
 cmake_minimum_required(VERSION 3.23)
-project(CppSharp VERSION 4.1.2
-        DESCRIPTION "A modern C++ project template using Conan and CMake"
+project(SmartDB VERSION 4.1.2
+        DESCRIPTION "A lightweight C++ database abstraction layer"
         LANGUAGES CXX)
 
 # 2. 包含 GNU 标准目录变量
@@ -46,7 +46,7 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_VENDOR "MyProject Inc.")
 set(PROJECT_AUTHOR "HoneyBury zoujiahe389@gmail.com")
 set(CPACK_PACKAGE_CONTACT "${PROJECT_AUTHOR}")
-set(PROJECT_URL "https://github.com/HoneyBury/CppSharp.git")
+set(PROJECT_URL "https://github.com/HoneyBury/SmartDB.git")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
 

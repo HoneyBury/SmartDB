@@ -1,9 +1,9 @@
 # src/CMakeLists.txt (修改后)
 
-# 1. 使用项目名创建核心库，而不是硬编码的 "cppsharp"
+# 1. 使用项目名创建核心库
 add_library(${PROJECT_NAME} STATIC
-        cppsharp/my_lib.cpp
-        cppsharp/my_lib.hpp
+        smartdb/support.cpp
+        smartdb/support.hpp
         sdb/types.hpp
         sdb/idb.hpp
         sdb/db.hpp
@@ -43,9 +43,8 @@ install(TARGETS ${PROJECT_NAME}  # <--- 修改这里
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-# 注意：你的头文件安装路径可能也需要调整
-# 这个路径会把 cppsharp.hpp 安装到 <prefix>/include/cppsharp/cppsharp.hpp
-install(FILES cppsharp/my_lib.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
+# 安装公共头文件
+install(FILES smartdb/support.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
 
 
 # 4. 创建主可执行文件 (app)

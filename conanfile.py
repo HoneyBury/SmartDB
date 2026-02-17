@@ -1,6 +1,4 @@
 ﻿# conanfile.py
-# FINAL, CORRECT, AND ROBUST VERSION
-# HELLO WORLD, THIS IS A TEST COMMENT TO FORCE A HASH CHANGE
 import os
 import re
 from conan import ConanFile
@@ -23,16 +21,15 @@ def get_project_data_from_cmake():
     return {
         "name": match.group(1).lower(),
         "version": match.group(2),
-        "description": match.group(3) or "A modern C++ project template."
+        "description": match.group(3) or "A lightweight C++ database abstraction layer."
     }
 
 _project_data = get_project_data_from_cmake()
 
 class MyProjectConan(ConanFile):
     """
-    This is the final, correct, and robust conanfile for a modern C++ project.
-    It relies on the standard, automated behaviors of Conan 2.x tools
-    and dynamically loads metadata from CMakeLists.txt.
+    Conan recipe for SmartDB.
+    Metadata is sourced from CMakeLists.txt to keep package values aligned.
     """
 
     # 1. Package Metadata
@@ -42,8 +39,8 @@ class MyProjectConan(ConanFile):
 
     license = "MIT"
     author = "HoneyBury zoujiahe389@gmail.com"
-    url = "https://github.com/HoneyBury/CppSharp.git"
-    topics = ("cpp", "cmake", "conan", "template", "scaffolding")
+    url = "https://github.com/HoneyBury/SmartDB.git"
+    topics = ("database", "cpp", "cmake", "conan")
 
     # 2. Binary Configuration
     settings = "os", "compiler", "build_type", "arch"
@@ -93,7 +90,7 @@ class MyProjectConan(ConanFile):
     def validate(self):
         if self.settings.compiler.cppstd:
             if Version(self.settings.compiler.cppstd) < "14":
-                raise ConanInvalidConfiguration("MyProject requires at least C++14.")
+                raise ConanInvalidConfiguration("SmartDB requires at least C++14.")
 
     def layout(self):
         cmake_layout(self)

@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <mutex>
 #include <fstream>
-#include <stdexcept>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
@@ -12,23 +11,35 @@ namespace sdb {
 
 class DatabaseManager {
 public:
+    DatabaseManager() = default;
+    DatabaseManager(const DatabaseManager&) = delete;
+    DatabaseManager& operator=(const DatabaseManager&) = delete;
+
     static DatabaseManager& instance() {
         static DatabaseManager inst;
         return inst;
     }
 
-    void registerDriver(std::shared_ptr<IDriver> driver) {
+    bool registerDriver(std::shared_ptr<IDriver> driver) {
         if (!driver) {
-            throw std::invalid_argument("Driver is null");
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastError_ = "Driver is null";
+            return false;
         }
 
         std::lock_guard<std::mutex> lock(mtx_);
         drivers_[driver->name()] = std::move(driver);
+        lastError_.clear();
+        return true;
     }
 
     bool loadConfig(const std::string& filePath) {
         std::ifstream f(filePath);
         if (!f.is_open()) {
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                lastError_ = "Cannot open config file: " + filePath;
+            }
             spdlog::error("Cannot open config file: {}", filePath);
             return false;
         }
@@ -36,15 +47,24 @@ public:
         try {
             nlohmann::json j = nlohmann::json::parse(f);
             if (!j.contains("connections") || !j["connections"].is_object()) {
+                {
+                    std::lock_guard<std::mutex> lock(mtx_);
+                    lastError_ = "Invalid config file format: missing object key 'connections'";
+                }
                 spdlog::error("Invalid config file format: missing object key 'connections'");
                 return false;
             }
 
             std::lock_guard<std::mutex> lock(mtx_);
             configs_ = j["connections"];
+            lastError_.clear();
             spdlog::info("Loaded {} connection configs.", configs_.size());
             return true;
         } catch (const std::exception& e) {
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                lastError_ = std::string("JSON parse error: ") + e.what();
+            }
             spdlog::error("JSON parse error: {}", e.what());
             return false;
         }
@@ -54,30 +74,48 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
 
         if (!configs_.contains(connectionName)) {
-            throw std::runtime_error("Connection config not found: " + connectionName);
+            lastError_ = "Connection config not found: " + connectionName;
+            return {};
         }
 
         const auto& config = configs_[connectionName];
         std::string driverName = config.value("driver", "");
         if (driverName.empty()) {
-            throw std::runtime_error("Missing required field 'driver' for connection: " + connectionName);
+            lastError_ = "Missing required field 'driver' for connection: " + connectionName;
+            return {};
         }
 
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
-            throw std::runtime_error("Driver not supported or registered: " + driverName);
+            lastError_ = "Driver not supported or registered: " + driverName;
+            return {};
         }
 
-        return it->second->createConnection(config);
+        auto conn = it->second->createConnection(config);
+        if (!conn) {
+            lastError_ = "Driver factory returned null connection: " + driverName;
+            return {};
+        }
+
+        lastError_.clear();
+        return conn;
     }
 
     std::unique_ptr<IConnection> createConnectionRaw(const std::string& driverName, const nlohmann::json& config) {
         std::lock_guard<std::mutex> lock(mtx_);
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
-            throw std::runtime_error("Driver not found: " + driverName);
+            lastError_ = "Driver not found: " + driverName;
+            return {};
         }
-        return it->second->createConnection(config);
+        auto conn = it->second->createConnection(config);
+        if (!conn) {
+            lastError_ = "Driver factory returned null connection: " + driverName;
+            return {};
+        }
+
+        lastError_.clear();
+        return conn;
     }
 
     std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName) {
@@ -87,11 +125,18 @@ public:
     std::shared_ptr<ConnectionPool> createPool(const std::string& connectionName,
                                                ConnectionPool::Options options) {
         options = normalizeOptions(options);
+        if (options.maxSize == 0) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastError_ = "ConnectionPool maxSize must be greater than 0";
+            return {};
+        }
+
         const auto key = poolKeyForName(connectionName, options);
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
+                lastError_.clear();
                 return cached;
             }
         }
@@ -99,14 +144,24 @@ public:
         auto factory = [this, connectionName]() {
             return this->createConnection(connectionName);
         };
-        auto pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        std::shared_ptr<ConnectionPool> pool;
+        try {
+            pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastError_ = std::string("Create pool failed: ") + e.what();
+            return {};
+        }
+
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
+                lastError_.clear();
                 return cached;
             }
             poolCache_[key] = pool;
+            lastError_.clear();
         }
         return pool;
     }
@@ -120,28 +175,54 @@ public:
                                                   const nlohmann::json& config,
                                                   ConnectionPool::Options options) {
         options = normalizeOptions(options);
+        if (options.maxSize == 0) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastError_ = "ConnectionPool maxSize must be greater than 0";
+            return {};
+        }
+
         const auto key = poolKeyForRaw(driverName, config, options);
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
+                lastError_.clear();
                 return cached;
+            }
+            if (drivers_.find(driverName) == drivers_.end()) {
+                lastError_ = "Driver not found: " + driverName;
+                return {};
             }
         }
 
         auto factory = [this, driverName, config]() {
             return this->createConnectionRaw(driverName, config);
         };
-        auto pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        std::shared_ptr<ConnectionPool> pool;
+        try {
+            pool = ConnectionPool::createWithFactory(std::move(factory), options);
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            lastError_ = std::string("Create pool failed: ") + e.what();
+            return {};
+        }
+
         {
             std::lock_guard<std::mutex> lock(mtx_);
             auto cached = getCachedPoolLocked(key);
             if (cached) {
+                lastError_.clear();
                 return cached;
             }
             poolCache_[key] = pool;
+            lastError_.clear();
         }
         return pool;
+    }
+
+    std::string lastError() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return lastError_;
     }
 
 private:
@@ -187,7 +268,8 @@ private:
     std::unordered_map<std::string, std::shared_ptr<IDriver>> drivers_;
     nlohmann::json configs_;
     std::unordered_map<std::string, std::weak_ptr<ConnectionPool>> poolCache_;
-    std::mutex mtx_;
+    mutable std::mutex mtx_;
+    std::string lastError_;
 };
 
 } // namespace sdb

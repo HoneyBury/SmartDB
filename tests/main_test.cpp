@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "cppsharp/my_lib.hpp"
+#include "smartdb/support.hpp"
 #include "sdb/types.hpp"
 #include "sdb/db.hpp"
 #include "sdb/connection_pool.hpp"
@@ -17,18 +17,18 @@
 #include <thread>
 #include <vector>
 
-class MyLibTest : public ::testing::Test {
+class SupportTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        setup_logger();
+        sdb::support::setupLogger();
     }
 };
 
-TEST_F(MyLibTest, GreetFunction) {
-    ASSERT_NO_THROW(greet("Tester"));
+TEST_F(SupportTest, GreetFunction) {
+    ASSERT_NO_THROW(sdb::support::greet("Tester"));
 }
 
-TEST(MyLibStandaloneTest, AlwaysPass) {
+TEST(SupportStandaloneTest, AlwaysPass) {
     EXPECT_EQ(1, 1);
     ASSERT_TRUE(true);
 }
@@ -158,8 +158,8 @@ TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
-    auto& manager = sdb::DatabaseManager::instance();
-    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    sdb::DatabaseManager manager;
+    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
 
     nlohmann::json j;
     j["connections"]["pool_sqlite"] = {
@@ -194,8 +194,8 @@ TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerRaw) {
-    auto& manager = sdb::DatabaseManager::instance();
-    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    sdb::DatabaseManager manager;
+    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
 
     sdb::ConnectionPool::Options options;
     options.maxSize = 1;
@@ -209,8 +209,8 @@ TEST(ConnectionPoolTest, CreateFromDatabaseManagerRaw) {
 }
 
 TEST(ConnectionPoolTest, DatabaseManagerPoolCacheReuseSameOptions) {
-    auto& manager = sdb::DatabaseManager::instance();
-    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    sdb::DatabaseManager manager;
+    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
 
     sdb::ConnectionPool::Options options;
     options.maxSize = 2;
@@ -225,8 +225,8 @@ TEST(ConnectionPoolTest, DatabaseManagerPoolCacheReuseSameOptions) {
 }
 
 TEST(ConnectionPoolTest, DatabaseManagerPoolCacheSeparatesOptions) {
-    auto& manager = sdb::DatabaseManager::instance();
-    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
+    sdb::DatabaseManager manager;
+    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>())) << manager.lastError();
 
     sdb::ConnectionPool::Options optionsA;
     optionsA.maxSize = 1;
@@ -243,12 +243,32 @@ TEST(ConnectionPoolTest, DatabaseManagerPoolCacheSeparatesOptions) {
     EXPECT_NE(pool1.get(), pool2.get());
 }
 
+TEST(DatabaseManagerTest, MissingConfigUsesLastErrorInsteadOfException) {
+    sdb::DatabaseManager manager;
+    ASSERT_TRUE(manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>()));
+
+    auto conn = manager.createConnection("missing_name");
+    EXPECT_FALSE(conn);
+    EXPECT_NE(manager.lastError().find("Connection config not found"), std::string::npos);
+}
+
+TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {
+    sdb::DatabaseManager manager;
+    auto pool = manager.createPoolRaw("unknown_driver", {{"path", ":memory:"}});
+    EXPECT_FALSE(pool);
+    EXPECT_NE(manager.lastError().find("Driver not found"), std::string::npos);
+}
+
 
 namespace {
 
 bool mysqlTestEnabled() {
-    // const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
-    return true;
+    const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
+    if (!enabled) {
+        return false;
+    }
+    const std::string value(enabled);
+    return value == "1" || value == "true" || value == "TRUE" || value == "on" || value == "ON";
 }
 
 nlohmann::json mysqlConfigFromEnv() {
@@ -316,4 +336,21 @@ TEST(MysqlDriverTest, ParameterCountMismatchShouldFail) {
 
     EXPECT_LT(conn->execute("INSERT INTO smartdb_mysql_test (id, name) VALUES (?, ?)", {int64_t{3001}}), 0);
     EXPECT_NE(conn->lastError().find("parameter count mismatch"), std::string::npos);
+}
+
+TEST(MysqlDriverTest, OpenCloseShouldBeIdempotent) {
+    if (!mysqlTestEnabled()) {
+        GTEST_SKIP() << "Set SMARTDB_MYSQL_TEST_ENABLE=1 to run MySQL integration tests.";
+    }
+
+    sdb::drivers::MysqlDriver driver;
+    auto conn = driver.createConnection(mysqlConfigFromEnv());
+
+    ASSERT_TRUE(conn->open()) << conn->lastError();
+    ASSERT_TRUE(conn->open()) << conn->lastError();
+    ASSERT_TRUE(conn->isOpen());
+
+    conn->close();
+    conn->close();
+    EXPECT_FALSE(conn->isOpen());
 }

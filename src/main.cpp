@@ -38,11 +38,14 @@ int main() {
     // 0. 准备测试配置文件
     createTestConfigFile();
 
-    auto& manager = sdb::DatabaseManager::instance();
+    sdb::DatabaseManager manager;
 
     // 1. 注册驱动
-    manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
-    manager.registerDriver(std::make_shared<sdb::drivers::MysqlDriver>());
+    if (!manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>()) ||
+        !manager.registerDriver(std::make_shared<sdb::drivers::MysqlDriver>())) {
+        spdlog::error("Register driver failed: {}", manager.lastError());
+        return -1;
+    }
 
     // 2. 加载配置
     if (!manager.loadConfig("db_config.json")) {
@@ -55,6 +58,10 @@ int main() {
         // ==========================================
         spdlog::info("--- Connecting to 'my_mysql' ---");
         auto mysqlConn = manager.createConnection("my_mysql");
+        if (!mysqlConn) {
+            spdlog::warn("Create MySQL connection failed: {}", manager.lastError());
+            return -1;
+        }
 
         if (mysqlConn->open()) {
             spdlog::info("MySQL Connected!");
@@ -85,6 +92,10 @@ int main() {
         // ==========================================
         spdlog::info("--- Connecting to 'my_sqlite' ---");
         auto sqliteConn = manager.createConnection("my_sqlite");
+        if (!sqliteConn) {
+            spdlog::warn("Create SQLite connection failed: {}", manager.lastError());
+            return -1;
+        }
         if (sqliteConn->open()) {
             spdlog::info("SQLite Connected!");
             // 创建表并插入数据
@@ -108,6 +119,10 @@ int main() {
         poolOptions.waitTimeout = std::chrono::milliseconds(2000);
 
         auto pool = manager.createPool("my_sqlite", poolOptions);
+        if (!pool) {
+            spdlog::warn("Create pool failed: {}", manager.lastError());
+            return -1;
+        }
         auto pooledConn = pool->acquire();
         if (pooledConn) {
             pooledConn->execute("CREATE TABLE IF NOT EXISTS pool_tb (id INTEGER, val TEXT)");
