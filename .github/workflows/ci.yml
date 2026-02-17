@@ -52,11 +52,20 @@ jobs:
         run: conan install . -of build/Release --build=missing -s build_type=Release -s compiler.cppstd=17
 
       - name: Configure CMake
-        run: >
-          cmake -S . -B build/${{ matrix.build_type }}
-          -DCMAKE_TOOLCHAIN_FILE=build/${{ matrix.build_type }}/generators/conan_toolchain.cmake
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -DBUILD_TESTING=ON
+        shell: bash
+        run: |
+          TOOLCHAIN_FILE=$(find "build/${{ matrix.build_type }}" -type f -name "conan_toolchain.cmake" | head -n 1)
+          if [ -z "$TOOLCHAIN_FILE" ]; then
+            echo "::error::Cannot find conan_toolchain.cmake under build/${{ matrix.build_type }}"
+            find "build/${{ matrix.build_type }}" -maxdepth 6 -type f || true
+            exit 1
+          fi
+
+          echo "Using Conan toolchain: $TOOLCHAIN_FILE"
+          cmake -S . -B "build/${{ matrix.build_type }}" \
+            "-DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN_FILE" \
+            "-DCMAKE_BUILD_TYPE=${{ matrix.build_type }}" \
+            -DBUILD_TESTING=ON
 
       - name: Build project with CMake
         run: cmake --build build/${{ matrix.build_type }} --config ${{ matrix.build_type }}
