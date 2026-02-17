@@ -89,8 +89,8 @@ class MyProjectConan(ConanFile):
 
     def validate(self):
         if self.settings.compiler.cppstd:
-            if Version(self.settings.compiler.cppstd) < "14":
-                raise ConanInvalidConfiguration("SmartDB requires at least C++14.")
+            if Version(self.settings.compiler.cppstd) < "17":
+                raise ConanInvalidConfiguration("SmartDB requires at least C++17.")
 
     def layout(self):
         cmake_layout(self)
