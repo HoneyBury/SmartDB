@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace sdb {
 
@@ -37,6 +39,10 @@ inline std::optional<OperationContext>& currentOperationContextSlot() {
     return ctx;
 }
 
+inline std::optional<OperationContext> currentOperationContext() {
+    return currentOperationContextSlot();
+}
+
 class OperationScope {
 public:
     explicit OperationScope(OperationContext ctx)
@@ -54,6 +60,36 @@ public:
 private:
     std::optional<OperationContext> previous_;
 };
+
+template <typename Fn>
+class BoundOperation {
+public:
+    BoundOperation(std::optional<OperationContext> ctx, Fn fn)
+        : ctx_(std::move(ctx)), fn_(std::move(fn)) {}
+
+    template <typename... Args>
+    decltype(auto) operator()(Args&&... args) {
+        if (ctx_.has_value()) {
+            OperationScope scope(*ctx_);
+            return fn_(std::forward<Args>(args)...);
+        }
+        return fn_(std::forward<Args>(args)...);
+    }
+
+private:
+    std::optional<OperationContext> ctx_;
+    Fn fn_;
+};
+
+template <typename Fn>
+auto bindOperationContext(const OperationContext& ctx, Fn&& fn) {
+    return BoundOperation<std::decay_t<Fn>>(ctx, std::forward<Fn>(fn));
+}
+
+template <typename Fn>
+auto bindCurrentOperationContext(Fn&& fn) {
+    return BoundOperation<std::decay_t<Fn>>(currentOperationContext(), std::forward<Fn>(fn));
+}
 
 inline std::string escapeJson(std::string_view input) {
     std::string out;

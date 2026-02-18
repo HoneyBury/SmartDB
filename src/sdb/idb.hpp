@@ -1,5 +1,6 @@
 #pragma once
 #include "types.hpp"
+#include "logging.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,23 +29,59 @@ public:
  virtual ~IConnection() = default;
 
  virtual DbResult<void> open() = 0;
+ DbResult<void> open(const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return open();
+ }
  virtual void close() = 0;
  virtual bool isOpen() const = 0;
 
  // 基础执行
  // query: 用于 SELECT, 返回结果集
  virtual DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) = 0;
+ DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return query(sql);
+ }
  virtual DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const std::vector<DbValue>& params) = 0;
+ DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql,
+                                             const std::vector<DbValue>& params,
+                                             const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return query(sql, params);
+ }
  // execute: 用于 INSERT/UPDATE/DELETE, 返回受影响行数
  virtual DbResult<int64_t> execute(const std::string& sql) = 0;
+ DbResult<int64_t> execute(const std::string& sql, const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return execute(sql);
+ }
 
  // 预编译执行 (参数化查询，防止注入)
  virtual DbResult<int64_t> execute(const std::string& sql, const std::vector<DbValue>& params) = 0;
+ DbResult<int64_t> execute(const std::string& sql,
+                           const std::vector<DbValue>& params,
+                           const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return execute(sql, params);
+ }
 
  // 事务支持
  virtual DbResult<void> begin() = 0;
+ DbResult<void> begin(const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return begin();
+ }
  virtual DbResult<void> commit() = 0;
+ DbResult<void> commit(const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return commit();
+ }
  virtual DbResult<void> rollback() = 0;
+ DbResult<void> rollback(const OperationContext& ctx) {
+  OperationScope scope(ctx);
+  return rollback();
+ }
 };
 
 class TransactionGuard {

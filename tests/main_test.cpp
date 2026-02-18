@@ -86,7 +86,46 @@ TEST(LoggingTest, ScopeAutomaticallyAppliesContext) {
     EXPECT_NE(line.find("\"operation\":\"scoped_op\""), std::string::npos);
 }
 
+TEST(LoggingTest, BindCurrentContextPropagatesAcrossThread) {
+    const auto ctx = sdb::makeOperationContext("thread_parent");
+    sdb::OperationScope scope(ctx);
+
+    auto task = sdb::bindCurrentOperationContext([]() {
+        auto current = sdb::currentOperationContext();
+        if (!current.has_value()) {
+            return std::string();
+        }
+        return current->traceId + "|" + current->operation;
+    });
+
+    auto fut = std::async(std::launch::async, task);
+    const auto observed = fut.get();
+    EXPECT_EQ(observed, ctx.traceId + "|" + ctx.operation);
+}
+
+TEST(LoggingTest, BindExplicitContextPropagatesAcrossThread) {
+    sdb::OperationContext ctx{"trace-explicit", "explicit_op"};
+    auto task = sdb::bindOperationContext(ctx, []() {
+        auto current = sdb::currentOperationContext();
+        if (!current.has_value()) {
+            return std::string();
+        }
+        return current->traceId + "|" + current->operation;
+    });
+
+    auto fut = std::async(std::launch::async, task);
+    EXPECT_EQ(fut.get(), "trace-explicit|explicit_op");
+}
+
 namespace {
+
+class EmptyResultSet : public sdb::IResultSet {
+public:
+    bool next() override { return false; }
+    sdb::DbValue get(int) override { return std::monostate{}; }
+    sdb::DbValue get(const std::string&) override { return std::monostate{}; }
+    std::vector<std::string> columnNames() override { return {}; }
+};
 
 class FakeTxConnection : public sdb::IConnection {
 public:
@@ -127,6 +166,60 @@ public:
     }
 };
 
+class ContextProbeConnection : public sdb::IConnection {
+public:
+    struct SeenContext {
+        std::string traceId;
+        std::string operation;
+    };
+
+    std::vector<SeenContext> seen;
+
+    sdb::DbResult<void> open() override {
+        capture();
+        return sdb::DbResult<void>::success();
+    }
+    void close() override {}
+    bool isOpen() const override { return true; }
+    sdb::DbResult<std::shared_ptr<sdb::IResultSet>> query(const std::string&) override {
+        capture();
+        return sdb::DbResult<std::shared_ptr<sdb::IResultSet>>::success(std::make_shared<EmptyResultSet>());
+    }
+    sdb::DbResult<std::shared_ptr<sdb::IResultSet>> query(const std::string&, const std::vector<sdb::DbValue>&) override {
+        capture();
+        return sdb::DbResult<std::shared_ptr<sdb::IResultSet>>::success(std::make_shared<EmptyResultSet>());
+    }
+    sdb::DbResult<int64_t> execute(const std::string&) override {
+        capture();
+        return sdb::DbResult<int64_t>::success(1);
+    }
+    sdb::DbResult<int64_t> execute(const std::string&, const std::vector<sdb::DbValue>&) override {
+        capture();
+        return sdb::DbResult<int64_t>::success(1);
+    }
+    sdb::DbResult<void> begin() override {
+        capture();
+        return sdb::DbResult<void>::success();
+    }
+    sdb::DbResult<void> commit() override {
+        capture();
+        return sdb::DbResult<void>::success();
+    }
+    sdb::DbResult<void> rollback() override {
+        capture();
+        return sdb::DbResult<void>::success();
+    }
+
+private:
+    void capture() {
+        auto ctx = sdb::currentOperationContext();
+        seen.push_back({
+            ctx.has_value() ? ctx->traceId : std::string(),
+            ctx.has_value() ? ctx->operation : std::string(),
+        });
+    }
+};
+
 } // namespace
 
 TEST(TransactionGuardTest, RollsBackWhenNotCommitted) {
@@ -163,6 +256,28 @@ TEST(TransactionGuardTest, BeginFailureReturnsError) {
     EXPECT_FALSE(txRes);
     EXPECT_NE(txRes.error().message.find("begin failed"), std::string::npos);
     EXPECT_EQ(conn.beginCount, 1);
+}
+
+TEST(IConnectionContextOverloadTest, DriverMethodsSeeContextViaOverloads) {
+    ContextProbeConnection conn;
+    sdb::IConnection& base = conn;
+    const sdb::OperationContext ctx{"trace-driver-ctx", "driver_op"};
+
+    ASSERT_TRUE(base.open(ctx));
+    ASSERT_TRUE(base.query("SELECT 1", ctx));
+    ASSERT_TRUE(base.query("SELECT 1 WHERE id = ?", {int64_t{1}}, ctx));
+    ASSERT_TRUE(base.execute("UPDATE t SET v = 1", ctx));
+    ASSERT_TRUE(base.execute("INSERT INTO t VALUES (?)", {int64_t{1}}, ctx));
+    ASSERT_TRUE(base.begin(ctx));
+    ASSERT_TRUE(base.commit(ctx));
+    ASSERT_TRUE(base.rollback(ctx));
+
+    ASSERT_EQ(conn.seen.size(), 8);
+    for (const auto& seenCtx : conn.seen) {
+        EXPECT_EQ(seenCtx.traceId, "trace-driver-ctx");
+        EXPECT_EQ(seenCtx.operation, "driver_op");
+    }
+    EXPECT_FALSE(sdb::currentOperationContext().has_value());
 }
 
 TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
@@ -420,6 +535,54 @@ TEST(ConnectionPoolTest, MetricsTrackFactoryFailures) {
     EXPECT_EQ(metrics.acquireFailures, 1);
     EXPECT_EQ(metrics.factoryFailures, 1);
     EXPECT_GE(metrics.errorKinds.get(sdb::DbErrorKind::Internal), 1);
+}
+
+TEST(ConnectionPoolTest, AcquireAsyncSucceeds) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 2;
+    options.waitTimeout = std::chrono::milliseconds(100);
+
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() {
+            return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(
+                driver->createConnection({{"path", ":memory:"}}));
+        },
+        options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
+
+    auto fut = pool->acquireAsync();
+    auto connRes = fut.get();
+    ASSERT_TRUE(connRes) << connRes.error().message;
+    auto conn = std::move(connRes.value());
+    ASSERT_TRUE(conn->isOpen());
+}
+
+TEST(ConnectionPoolTest, AcquireAsyncTimesOutWhenExhausted) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.waitTimeout = std::chrono::milliseconds(40);
+
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() {
+            return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(
+                driver->createConnection({{"path", ":memory:"}}));
+        },
+        options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
+
+    auto first = pool->acquire();
+    ASSERT_TRUE(first) << first.error().message;
+    auto held = std::move(first.value());
+
+    auto fut = pool->acquireAsync();
+    auto second = fut.get();
+    EXPECT_FALSE(second);
+    EXPECT_EQ(second.error().kind, sdb::DbErrorKind::Timeout);
+    EXPECT_TRUE(second.error().retryable);
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {

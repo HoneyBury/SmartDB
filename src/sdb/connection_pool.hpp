@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -190,6 +191,22 @@ public:
     DbResult<Handle> acquire(const OperationContext& ctx) {
         OperationScope scope(ctx);
         return acquire();
+    }
+
+    std::future<DbResult<Handle>> acquireAsync() {
+        auto self = shared_from_this();
+        auto task = bindCurrentOperationContext([self]() {
+            return self->acquire();
+        });
+        return std::async(std::launch::async, std::move(task));
+    }
+
+    std::future<DbResult<Handle>> acquireAsync(const OperationContext& ctx) {
+        auto self = shared_from_this();
+        auto task = bindOperationContext(ctx, [self]() {
+            return self->acquire();
+        });
+        return std::async(std::launch::async, std::move(task));
     }
 
     void shutdown() {
