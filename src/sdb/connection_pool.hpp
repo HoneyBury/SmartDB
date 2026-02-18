@@ -1,5 +1,6 @@
 #pragma once
 #include "idb.hpp"
+#include "logging.hpp"
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -31,6 +32,7 @@ public:
         uint64_t totalAcquireWaitMicros = 0;
         uint64_t averageAcquireWaitMicros = 0;
         size_t peakInUse = 0;
+        DbErrorCounters errorKinds{};
     };
 
     struct ReturnToPool {
@@ -56,10 +58,14 @@ public:
 
     static DbResult<std::shared_ptr<ConnectionPool>> createWithFactory(Factory factory, Options options) {
         if (!factory) {
+            auto err = DbError{0, "ConnectionPool requires a valid factory", DbErrorKind::InvalidArgument, false};
+            logDbError(spdlog::level::warn, "connection_pool_create", err);
             return DbResult<std::shared_ptr<ConnectionPool>>::failure(
                 "ConnectionPool requires a valid factory", 0, DbErrorKind::InvalidArgument, false);
         }
         if (options.maxSize == 0) {
+            auto err = DbError{0, "ConnectionPool maxSize must be greater than 0", DbErrorKind::InvalidArgument, false};
+            logDbError(spdlog::level::warn, "connection_pool_create", err);
             return DbResult<std::shared_ptr<ConnectionPool>>::failure(
                 "ConnectionPool maxSize must be greater than 0", 0, DbErrorKind::InvalidArgument, false);
         }
@@ -79,7 +85,9 @@ public:
         if (closed_) {
             const std::string error = "Connection pool is closed";
             lastError_ = error;
-            recordFailureLocked(acquireStart, false);
+            recordFailureLocked(acquireStart, false, DbErrorKind::Connection);
+            logDbError(spdlog::level::warn, "connection_pool_acquire",
+                       DbError{0, error, DbErrorKind::Connection, true});
             return DbResult<Handle>::failure(error, 0, DbErrorKind::Connection, true);
         }
 
@@ -100,7 +108,9 @@ public:
                     cv_.notify_one();
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
-                        recordFailureLocked(acquireStart, false);
+                        recordFailureLocked(acquireStart, false, DbErrorKind::Connection);
+                        logDbError(spdlog::level::warn, "connection_pool_acquire",
+                                   DbError{0, lastError_, DbErrorKind::Connection, true});
                         return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                     }
                     continue;
@@ -126,7 +136,9 @@ public:
                         lastError_ = "Connection factory returned null";
                     }
                     cv_.notify_one();
-                    recordFailureLocked(acquireStart, false);
+                    recordFailureLocked(acquireStart, false, DbErrorKind::Internal);
+                    logDbError(spdlog::level::warn, "connection_pool_acquire",
+                               DbError{0, lastError_, DbErrorKind::Connection, true});
                     return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                 }
 
@@ -140,7 +152,9 @@ public:
                     cv_.notify_one();
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
-                        recordFailureLocked(acquireStart, false);
+                        recordFailureLocked(acquireStart, false, DbErrorKind::Connection);
+                        logDbError(spdlog::level::warn, "connection_pool_acquire",
+                                   DbError{0, lastError_, DbErrorKind::Connection, true});
                         return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                     }
                     continue;
@@ -155,7 +169,9 @@ public:
             if (options_.waitTimeout.count() == 0) {
                 const std::string error = "Connection pool exhausted";
                 lastError_ = error;
-                recordFailureLocked(acquireStart, false);
+                recordFailureLocked(acquireStart, false, DbErrorKind::Connection);
+                logDbError(spdlog::level::warn, "connection_pool_acquire",
+                           DbError{0, error, DbErrorKind::Connection, true});
                 return DbResult<Handle>::failure(error, 0, DbErrorKind::Connection, true);
             }
 
@@ -163,10 +179,17 @@ public:
             if (cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
                 const std::string error = "Connection pool acquire timed out";
                 lastError_ = error;
-                recordFailureLocked(acquireStart, true);
+                recordFailureLocked(acquireStart, true, DbErrorKind::Timeout);
+                logDbError(spdlog::level::warn, "connection_pool_acquire",
+                           DbError{0, error, DbErrorKind::Timeout, true});
                 return DbResult<Handle>::failure(error, 0, DbErrorKind::Timeout, true);
             }
         }
+    }
+
+    DbResult<Handle> acquire(const OperationContext& ctx) {
+        OperationScope scope(ctx);
+        return acquire();
     }
 
     void shutdown() {
@@ -224,6 +247,7 @@ public:
         snapshot.factoryFailures = factoryFailures_;
         snapshot.totalAcquireWaitMicros = totalAcquireWaitMicros_;
         snapshot.peakInUse = peakInUse_;
+        snapshot.errorKinds = errorKinds_;
         const uint64_t completed = acquireSuccesses_ + acquireFailures_;
         snapshot.averageAcquireWaitMicros = completed == 0 ? 0 : (totalAcquireWaitMicros_ / completed);
         return snapshot;
@@ -239,6 +263,7 @@ public:
         factoryFailures_ = 0;
         totalAcquireWaitMicros_ = 0;
         peakInUse_ = inUseSizeLocked();
+        errorKinds_ = {};
     }
 
     ~ConnectionPool() { shutdown(); }
@@ -298,6 +323,7 @@ private:
                 setError(msg);
                 std::lock_guard<std::mutex> lock(mtx_);
                 ++factoryFailures_;
+                errorKinds_.increment(DbErrorKind::Internal);
                 DbError err = connRes.error();
                 err.message = msg;
                 if (err.kind == DbErrorKind::Unknown) {
@@ -313,6 +339,7 @@ private:
                 setError(msg);
                 std::lock_guard<std::mutex> lock(mtx_);
                 ++factoryFailures_;
+                errorKinds_.increment(DbErrorKind::Internal);
                 return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
             }
 
@@ -322,12 +349,14 @@ private:
             setError(msg);
             std::lock_guard<std::mutex> lock(mtx_);
             ++factoryFailures_;
+            errorKinds_.increment(DbErrorKind::Internal);
             return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
         } catch (...) {
             const std::string msg = "Connection factory error: unknown exception";
             setError(msg);
             std::lock_guard<std::mutex> lock(mtx_);
             ++factoryFailures_;
+            errorKinds_.increment(DbErrorKind::Internal);
             return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
         }
     }
@@ -368,11 +397,14 @@ private:
         }
     }
 
-    void recordFailureLocked(const std::chrono::steady_clock::time_point& acquireStart, bool timedOut) {
+    void recordFailureLocked(const std::chrono::steady_clock::time_point& acquireStart,
+                             bool timedOut,
+                             DbErrorKind kind) {
         ++acquireFailures_;
         if (timedOut) {
             ++acquireTimeouts_;
         }
+        errorKinds_.increment(kind);
         const auto waitMicros = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - acquireStart).count();
         totalAcquireWaitMicros_ += static_cast<uint64_t>(waitMicros < 0 ? 0 : waitMicros);
@@ -395,6 +427,7 @@ private:
     uint64_t factoryFailures_ = 0;
     uint64_t totalAcquireWaitMicros_ = 0;
     size_t peakInUse_ = 0;
+    DbErrorCounters errorKinds_{};
 };
 
 } // namespace sdb

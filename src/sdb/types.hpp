@@ -1,5 +1,6 @@
 #pragma once
 #include <variant>
+#include <array>
 #include <string>
 #include <vector>
 #include <map>
@@ -33,6 +34,41 @@ enum class DbErrorKind {
  Query,
  Execution,
  Internal
+};
+
+inline constexpr size_t kDbErrorKindCount = static_cast<size_t>(DbErrorKind::Internal) + 1;
+
+inline constexpr size_t errorKindIndex(DbErrorKind kind) {
+    return static_cast<size_t>(kind);
+}
+
+inline const char* toString(DbErrorKind kind) {
+    switch (kind) {
+        case DbErrorKind::Unknown: return "Unknown";
+        case DbErrorKind::Configuration: return "Configuration";
+        case DbErrorKind::Connection: return "Connection";
+        case DbErrorKind::Authentication: return "Authentication";
+        case DbErrorKind::Timeout: return "Timeout";
+        case DbErrorKind::NotFound: return "NotFound";
+        case DbErrorKind::InvalidArgument: return "InvalidArgument";
+        case DbErrorKind::Transaction: return "Transaction";
+        case DbErrorKind::Query: return "Query";
+        case DbErrorKind::Execution: return "Execution";
+        case DbErrorKind::Internal: return "Internal";
+    }
+    return "Unknown";
+}
+
+struct DbErrorCounters {
+    std::array<uint64_t, kDbErrorKindCount> counts{};
+
+    uint64_t get(DbErrorKind kind) const {
+        return counts[errorKindIndex(kind)];
+    }
+
+    void increment(DbErrorKind kind) {
+        ++counts[errorKindIndex(kind)];
+    }
 };
 
 struct DbError {

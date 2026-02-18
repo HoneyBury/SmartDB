@@ -9,6 +9,7 @@
 
 #include "sdb/db.hpp"
 #include "sdb/connection_pool.hpp"
+#include "sdb/logging.hpp"
 #include "sdb/drivers/mysql_driver.hpp"
 #include "sdb/drivers/sqlite_driver.hpp"
 
@@ -34,6 +35,9 @@ void createTestConfigFile() {
 
 int main() {
     spdlog::set_level(spdlog::level::debug);
+    const auto rootCtx = sdb::makeOperationContext("app_main");
+    sdb::OperationScope rootScope(rootCtx);
+    sdb::logOperationEvent(spdlog::level::info, "startup", "application_start", rootCtx);
 
     // 0. 准备测试配置文件
     createTestConfigFile();
@@ -41,18 +45,23 @@ int main() {
     sdb::DatabaseManager manager;
 
     // 1. 注册驱动
-    auto sqliteReg = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>());
-    auto mysqlReg = manager.registerDriver(std::make_shared<sdb::drivers::MysqlDriver>());
+    auto regCtx = sdb::childOperationContext(rootCtx, "register_driver");
+    auto sqliteReg = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>(), regCtx);
+    auto mysqlReg = manager.registerDriver(std::make_shared<sdb::drivers::MysqlDriver>(), regCtx);
     if (!sqliteReg || !mysqlReg) {
-        const std::string err = !sqliteReg ? sqliteReg.error().message : mysqlReg.error().message;
-        spdlog::error("Register driver failed: {}", err);
+        sdb::logResultError(
+            spdlog::level::err,
+            "register_driver",
+            !sqliteReg ? sqliteReg : mysqlReg,
+            regCtx);
         return -1;
     }
 
     // 2. 加载配置
-    auto loadRes = manager.loadConfig("db_config.json");
+    auto loadCtx = sdb::childOperationContext(rootCtx, "load_config");
+    auto loadRes = manager.loadConfig("db_config.json", loadCtx);
     if (!loadRes) {
-        spdlog::error("Load config failed: {}", loadRes.error().message);
+        sdb::logResultError(spdlog::level::err, "load_config", loadRes, loadCtx);
         return -1;
     }
 
@@ -61,13 +70,20 @@ int main() {
         // 使用配置名连接 MySQL（演示参数化执行）
         // ==========================================
         spdlog::info("--- Connecting to 'my_mysql' ---");
-        auto mysqlConnRes = manager.createConnection("my_mysql");
+        auto mysqlCreateCtx = sdb::childOperationContext(rootCtx, "create_mysql_connection");
+        auto mysqlConnRes = manager.createConnection("my_mysql", mysqlCreateCtx);
         if (!mysqlConnRes) {
-            spdlog::warn("Create MySQL connection failed: {}", mysqlConnRes.error().message);
+            sdb::logResultError(
+                spdlog::level::warn,
+                "create_mysql_connection",
+                mysqlConnRes,
+                mysqlCreateCtx);
             return -1;
         }
         auto mysqlConn = std::move(mysqlConnRes.value());
 
+        auto mysqlOpenCtx = sdb::childOperationContext(rootCtx, "open_mysql_connection");
+        sdb::OperationScope mysqlOpenScope(mysqlOpenCtx);
         auto mysqlOpen = mysqlConn->open();
         if (mysqlOpen) {
             spdlog::info("MySQL Connected!");
@@ -94,19 +110,30 @@ int main() {
                 spdlog::info("MySQL row => id={}, val={}, payload_size={}", id, val, payload.size());
             }
         } else {
-            spdlog::warn("MySQL open failed: {}", mysqlOpen.error().message);
+            sdb::logResultError(
+                spdlog::level::warn,
+                "open_mysql_connection",
+                mysqlOpen,
+                mysqlOpenCtx);
         }
 
         // ==========================================
         // 使用配置名连接 SQLite
         // ==========================================
         spdlog::info("--- Connecting to 'my_sqlite' ---");
-        auto sqliteConnRes = manager.createConnection("my_sqlite");
+        auto sqliteCreateCtx = sdb::childOperationContext(rootCtx, "create_sqlite_connection");
+        auto sqliteConnRes = manager.createConnection("my_sqlite", sqliteCreateCtx);
         if (!sqliteConnRes) {
-            spdlog::warn("Create SQLite connection failed: {}", sqliteConnRes.error().message);
+            sdb::logResultError(
+                spdlog::level::warn,
+                "create_sqlite_connection",
+                sqliteConnRes,
+                sqliteCreateCtx);
             return -1;
         }
         auto sqliteConn = std::move(sqliteConnRes.value());
+        auto sqliteOpenCtx = sdb::childOperationContext(rootCtx, "open_sqlite_connection");
+        sdb::OperationScope sqliteOpenScope(sqliteOpenCtx);
         auto sqliteOpen = sqliteConn->open();
         if (sqliteOpen) {
             spdlog::info("SQLite Connected!");
@@ -130,13 +157,19 @@ int main() {
         poolOptions.maxSize = 4;
         poolOptions.waitTimeout = std::chrono::milliseconds(2000);
 
-        auto poolRes = manager.createPool("my_sqlite", poolOptions);
+        auto poolCreateCtx = sdb::childOperationContext(rootCtx, "create_sqlite_pool");
+        auto poolRes = manager.createPool("my_sqlite", poolOptions, poolCreateCtx);
         if (!poolRes) {
-            spdlog::warn("Create pool failed: {}", poolRes.error().message);
+            sdb::logResultError(
+                spdlog::level::warn,
+                "create_sqlite_pool",
+                poolRes,
+                poolCreateCtx);
             return -1;
         }
         auto pool = poolRes.value();
-        auto pooledConnRes = pool->acquire();
+        auto poolAcquireCtx = sdb::childOperationContext(rootCtx, "acquire_pooled_connection");
+        auto pooledConnRes = pool->acquire(poolAcquireCtx);
         if (pooledConnRes) {
             auto pooledConn = std::move(pooledConnRes.value());
             pooledConn->execute("CREATE TABLE IF NOT EXISTS pool_tb (id INTEGER, val TEXT)");
@@ -146,12 +179,18 @@ int main() {
                 spdlog::info("Pool result: {}", std::get<std::string>(rsRes.value()->get("val")));
             }
         } else {
-            spdlog::warn("Pool acquire failed: {}", pooledConnRes.error().message);
+            sdb::logResultError(
+                spdlog::level::warn,
+                "acquire_pooled_connection",
+                pooledConnRes,
+                poolAcquireCtx);
         }
 
     } catch (const std::exception& e) {
-        spdlog::error("Error: {}", e.what());
+        sdb::DbError err{0, e.what(), sdb::DbErrorKind::Internal, false};
+        sdb::logDbError(spdlog::level::err, "unhandled_exception", err, sdb::childOperationContext(rootCtx, "exception"));
     }
 
+    sdb::logOperationEvent(spdlog::level::info, "shutdown", "application_end", rootCtx);
     return 0;
 }

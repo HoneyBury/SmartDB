@@ -5,6 +5,7 @@ add_library(${PROJECT_NAME} STATIC
         smartdb/support.cpp
         smartdb/support.hpp
         sdb/types.hpp
+        sdb/logging.hpp
         sdb/idb.hpp
         sdb/query_utils.hpp
         sdb/db.hpp

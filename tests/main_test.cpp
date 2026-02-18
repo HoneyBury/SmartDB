@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "smartdb/support.hpp"
 #include "sdb/types.hpp"
+#include "sdb/logging.hpp"
 #include "sdb/db.hpp"
 #include "sdb/connection_pool.hpp"
 #include "sdb/query_utils.hpp"
@@ -43,6 +44,46 @@ TEST(SdbTypesTest, ToStringAndNullHelpers) {
     EXPECT_EQ(sdb::toString(nullValue), "NULL");
     EXPECT_EQ(sdb::toString(intValue), "42");
     EXPECT_EQ(sdb::toString(boolValue), "true");
+}
+
+TEST(LoggingTest, StructuredLogContainsExpectedFields) {
+    sdb::DbError err;
+    err.code = 1045;
+    err.message = "auth failed";
+    err.kind = sdb::DbErrorKind::Authentication;
+    err.retryable = false;
+
+    const auto line = sdb::toStructuredLog("db_connect", err);
+    EXPECT_NE(line.find("\"event\":\"db_connect\""), std::string::npos);
+    EXPECT_NE(line.find("\"kind\":\"Authentication\""), std::string::npos);
+    EXPECT_NE(line.find("\"retryable\":false"), std::string::npos);
+    EXPECT_NE(line.find("\"code\":1045"), std::string::npos);
+    EXPECT_NE(line.find("\"message\":\"auth failed\""), std::string::npos);
+}
+
+TEST(LoggingTest, StructuredLogContainsTraceAndOperation) {
+    sdb::DbError err;
+    err.code = 1;
+    err.message = "oops";
+    err.kind = sdb::DbErrorKind::Internal;
+    err.retryable = true;
+
+    sdb::OperationContext ctx{"trace-123", "create_connection"};
+    const auto line = sdb::toStructuredLog("db_error", err, ctx);
+
+    EXPECT_NE(line.find("\"trace_id\":\"trace-123\""), std::string::npos);
+    EXPECT_NE(line.find("\"operation\":\"create_connection\""), std::string::npos);
+    EXPECT_NE(line.find("\"retryable\":true"), std::string::npos);
+}
+
+TEST(LoggingTest, ScopeAutomaticallyAppliesContext) {
+    sdb::OperationContext ctx{"trace-scope", "scoped_op"};
+    sdb::OperationScope scope(ctx);
+
+    sdb::DbError err{7, "x", sdb::DbErrorKind::Query, false};
+    const auto line = sdb::toStructuredLog("query_failed", err, ctx);
+    EXPECT_NE(line.find("\"trace_id\":\"trace-scope\""), std::string::npos);
+    EXPECT_NE(line.find("\"operation\":\"scoped_op\""), std::string::npos);
 }
 
 namespace {
@@ -356,6 +397,7 @@ TEST(ConnectionPoolTest, MetricsTrackTimeoutAndPeakUsage) {
     EXPECT_GE(metrics.waitEvents, 1);
     EXPECT_GE(metrics.peakInUse, static_cast<size_t>(1));
     EXPECT_GT(metrics.totalAcquireWaitMicros, static_cast<uint64_t>(0));
+    EXPECT_EQ(metrics.errorKinds.get(sdb::DbErrorKind::Timeout), 1);
 }
 
 TEST(ConnectionPoolTest, MetricsTrackFactoryFailures) {
@@ -377,6 +419,7 @@ TEST(ConnectionPoolTest, MetricsTrackFactoryFailures) {
     EXPECT_EQ(metrics.acquireAttempts, 1);
     EXPECT_EQ(metrics.acquireFailures, 1);
     EXPECT_EQ(metrics.factoryFailures, 1);
+    EXPECT_GE(metrics.errorKinds.get(sdb::DbErrorKind::Internal), 1);
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
@@ -494,6 +537,8 @@ TEST(DatabaseManagerTest, MissingConfigUsesLastErrorInsteadOfException) {
     EXPECT_NE(connRes.error().message.find("Connection config not found"), std::string::npos);
     EXPECT_EQ(connRes.error().kind, sdb::DbErrorKind::NotFound);
     EXPECT_FALSE(connRes.error().retryable);
+    auto counters = manager.errorCounters();
+    EXPECT_GE(counters.get(sdb::DbErrorKind::NotFound), 1);
 }
 
 TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {
@@ -501,6 +546,30 @@ TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {
     auto poolRes = manager.createPoolRaw("unknown_driver", {{"path", ":memory:"}});
     EXPECT_FALSE(poolRes);
     EXPECT_NE(poolRes.error().message.find("Driver not found"), std::string::npos);
+    auto counters = manager.errorCounters();
+    EXPECT_GE(counters.get(sdb::DbErrorKind::NotFound), 1);
+}
+
+TEST(DatabaseManagerTest, ErrorCountersCanReset) {
+    sdb::DatabaseManager manager;
+    auto res = manager.createConnection("missing");
+    EXPECT_FALSE(res);
+    EXPECT_GE(manager.errorCounters().get(sdb::DbErrorKind::NotFound), 1);
+
+    manager.resetErrorCounters();
+    EXPECT_EQ(manager.errorCounters().get(sdb::DbErrorKind::NotFound), 0);
+}
+
+TEST(DatabaseManagerTest, ContextOverloadsWork) {
+    sdb::DatabaseManager manager;
+    const auto ctx = sdb::makeOperationContext("manager_test");
+
+    auto regRes = manager.registerDriver(std::make_shared<sdb::drivers::SqliteDriver>(), ctx);
+    ASSERT_TRUE(regRes) << regRes.error().message;
+
+    auto connRes = manager.createConnection("missing_name", ctx);
+    EXPECT_FALSE(connRes);
+    EXPECT_EQ(connRes.error().kind, sdb::DbErrorKind::NotFound);
 }
 
 
