@@ -60,6 +60,9 @@ public:
     sdb::DbResult<std::shared_ptr<sdb::IResultSet>> query(const std::string&) override {
         return sdb::DbResult<std::shared_ptr<sdb::IResultSet>>::failure("Not implemented");
     }
+    sdb::DbResult<std::shared_ptr<sdb::IResultSet>> query(const std::string&, const std::vector<sdb::DbValue>&) override {
+        return sdb::DbResult<std::shared_ptr<sdb::IResultSet>>::failure("Not implemented");
+    }
     sdb::DbResult<int64_t> execute(const std::string&) override {
         return sdb::DbResult<int64_t>::failure("Not implemented");
     }
@@ -148,6 +151,32 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
 
     auto payload = std::get<std::vector<uint8_t>>(rs->get("payload"));
     EXPECT_EQ(payload, blob);
+}
+
+TEST(SqliteDriverTest, ParameterizedQueryWorks) {
+    sdb::drivers::SqliteDriver driver;
+    auto conn = driver.createConnection({{"path", ":memory:"}});
+
+    ASSERT_TRUE(conn->open());
+    ASSERT_TRUE(conn->execute("CREATE TABLE demo2 (id INTEGER, name TEXT)"));
+    ASSERT_TRUE(conn->execute("INSERT INTO demo2 VALUES (1, 'alice')"));
+    ASSERT_TRUE(conn->execute("INSERT INTO demo2 VALUES (2, 'bob')"));
+
+    auto rsRes = conn->query("SELECT name FROM demo2 WHERE id = ? AND name = ?", {int64_t{2}, std::string("bob")});
+    ASSERT_TRUE(rsRes) << rsRes.error().message;
+    ASSERT_TRUE(rsRes.value()->next());
+    EXPECT_EQ(std::get<std::string>(rsRes.value()->get(0)), "bob");
+}
+
+TEST(SqliteDriverTest, ParameterizedQueryMismatchShouldFail) {
+    sdb::drivers::SqliteDriver driver;
+    auto conn = driver.createConnection({{"path", ":memory:"}});
+
+    ASSERT_TRUE(conn->open());
+    ASSERT_TRUE(conn->execute("CREATE TABLE demo3 (id INTEGER, name TEXT)"));
+
+    auto rsRes = conn->query("SELECT name FROM demo3 WHERE id = ?", {int64_t{1}, std::string("extra")});
+    EXPECT_FALSE(rsRes);
 }
 
 TEST(QueryUtilsTest, QueryOneReturnsSingleRow) {
@@ -535,6 +564,13 @@ TEST(MysqlDriverTest, ParameterizedInsertAndQueryTypes) {
     EXPECT_EQ(std::get<std::string>(rs->get("name")), "row-disabled");
     EXPECT_FALSE(std::get<bool>(rs->get("enabled")));
     EXPECT_EQ(std::get<std::vector<uint8_t>>(rs->get("payload")), payload);
+
+    auto qRes = conn->query(
+        "SELECT id, name FROM smartdb_mysql_test WHERE id = ? AND name = ?",
+        {int64_t{1002}, std::string("row-disabled")});
+    ASSERT_TRUE(qRes) << qRes.error().message;
+    ASSERT_TRUE(qRes.value()->next());
+    EXPECT_EQ(std::get<int64_t>(qRes.value()->get("id")), 1002);
 }
 
 TEST(MysqlDriverTest, ParameterCountMismatchShouldFail) {

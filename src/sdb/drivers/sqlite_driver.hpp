@@ -129,6 +129,56 @@ public:
         return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<SqliteResultSet>(stmt));
     }
 
+    DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const std::vector<DbValue>& params) override {
+        if (!isOpen()) {
+            lastErr_ = "Connection is closed";
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
+        }
+
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            lastErr_ = sqlite3_errmsg(db_);
+            if (stmt) {
+                sqlite3_finalize(stmt);
+            }
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, rc);
+        }
+
+        for (size_t i = 0; i < params.size(); ++i) {
+            const int bindIndex = static_cast<int>(i + 1);
+            const auto& p = params[i];
+            rc = SQLITE_OK;
+
+            if (std::holds_alternative<std::monostate>(p)) {
+                rc = sqlite3_bind_null(stmt, bindIndex);
+            } else if (std::holds_alternative<int>(p)) {
+                rc = sqlite3_bind_int(stmt, bindIndex, std::get<int>(p));
+            } else if (std::holds_alternative<int64_t>(p)) {
+                rc = sqlite3_bind_int64(stmt, bindIndex, std::get<int64_t>(p));
+            } else if (std::holds_alternative<double>(p)) {
+                rc = sqlite3_bind_double(stmt, bindIndex, std::get<double>(p));
+            } else if (std::holds_alternative<bool>(p)) {
+                rc = sqlite3_bind_int(stmt, bindIndex, std::get<bool>(p) ? 1 : 0);
+            } else if (std::holds_alternative<std::string>(p)) {
+                const auto& str = std::get<std::string>(p);
+                rc = sqlite3_bind_text(stmt, bindIndex, str.c_str(), -1, SQLITE_TRANSIENT);
+            } else if (std::holds_alternative<std::vector<uint8_t>>(p)) {
+                const auto& blob = std::get<std::vector<uint8_t>>(p);
+                rc = sqlite3_bind_blob(stmt, bindIndex, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+            }
+
+            if (rc != SQLITE_OK) {
+                lastErr_ = sqlite3_errmsg(db_);
+                sqlite3_finalize(stmt);
+                return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, rc);
+            }
+        }
+
+        lastErr_.clear();
+        return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<SqliteResultSet>(stmt));
+    }
+
     DbResult<int64_t> execute(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";

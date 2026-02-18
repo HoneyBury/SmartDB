@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -199,6 +201,21 @@ public:
         return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<MysqlResultSet>(res));
     }
 
+    DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const std::vector<DbValue>& params) override {
+        if (!isOpen()) {
+            lastErr_ = "Connection is closed";
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
+        }
+
+        auto interpolated = interpolateQuery(sql, params);
+        if (!interpolated) {
+            lastErr_ = interpolated.error().message;
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, interpolated.error().code);
+        }
+
+        return query(interpolated.value());
+    }
+
     DbResult<int64_t> execute(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
@@ -370,6 +387,113 @@ public:
             return DbResult<void>::failure(res.error().message, res.error().code);
         }
         return DbResult<void>::success();
+    }
+
+private:
+    DbResult<std::string> toSqlLiteral(const DbValue& value) {
+        if (std::holds_alternative<std::monostate>(value)) {
+            return DbResult<std::string>::success("NULL");
+        }
+        if (auto v = std::get_if<int>(&value)) {
+            return DbResult<std::string>::success(std::to_string(*v));
+        }
+        if (auto v = std::get_if<int64_t>(&value)) {
+            return DbResult<std::string>::success(std::to_string(*v));
+        }
+        if (auto v = std::get_if<bool>(&value)) {
+            return DbResult<std::string>::success(*v ? "1" : "0");
+        }
+        if (auto v = std::get_if<double>(&value)) {
+            std::ostringstream ss;
+            ss.imbue(std::locale::classic());
+            ss.precision(17);
+            ss << *v;
+            return DbResult<std::string>::success(ss.str());
+        }
+        if (auto v = std::get_if<std::string>(&value)) {
+            std::string escaped;
+            escaped.resize(v->size() * 2 + 1);
+            const auto written = mysql_real_escape_string(
+                conn_, escaped.data(), v->c_str(), static_cast<unsigned long>(v->size()));
+            escaped.resize(written);
+            return DbResult<std::string>::success("'" + escaped + "'");
+        }
+        if (auto v = std::get_if<std::vector<uint8_t>>(&value)) {
+            static constexpr char HEX[] = "0123456789ABCDEF";
+            std::string hex;
+            hex.reserve(v->size() * 2);
+            for (uint8_t b : *v) {
+                hex.push_back(HEX[(b >> 4) & 0x0F]);
+                hex.push_back(HEX[b & 0x0F]);
+            }
+            return DbResult<std::string>::success("X'" + hex + "'");
+        }
+        return DbResult<std::string>::failure("Unsupported parameter type");
+    }
+
+    DbResult<std::string> interpolateQuery(const std::string& sql, const std::vector<DbValue>& params) {
+        std::string output;
+        output.reserve(sql.size() + params.size() * 8);
+
+        bool inSingle = false;
+        bool inDouble = false;
+        bool inBacktick = false;
+        bool escape = false;
+        size_t paramIndex = 0;
+
+        for (char ch : sql) {
+            if (escape) {
+                output.push_back(ch);
+                escape = false;
+                continue;
+            }
+
+            if ((inSingle || inDouble) && ch == '\\') {
+                output.push_back(ch);
+                escape = true;
+                continue;
+            }
+
+            if (!inDouble && !inBacktick && ch == '\'') {
+                inSingle = !inSingle;
+                output.push_back(ch);
+                continue;
+            }
+            if (!inSingle && !inBacktick && ch == '"') {
+                inDouble = !inDouble;
+                output.push_back(ch);
+                continue;
+            }
+            if (!inSingle && !inDouble && ch == '`') {
+                inBacktick = !inBacktick;
+                output.push_back(ch);
+                continue;
+            }
+
+            if (!inSingle && !inDouble && !inBacktick && ch == '?') {
+                if (paramIndex >= params.size()) {
+                    return DbResult<std::string>::failure(
+                        "parameter count mismatch: expected at least " + std::to_string(paramIndex + 1) +
+                        ", got " + std::to_string(params.size()));
+                }
+                auto literal = toSqlLiteral(params[paramIndex++]);
+                if (!literal) {
+                    return literal;
+                }
+                output += literal.value();
+                continue;
+            }
+
+            output.push_back(ch);
+        }
+
+        if (paramIndex != params.size()) {
+            return DbResult<std::string>::failure(
+                "parameter count mismatch: expected " + std::to_string(paramIndex) +
+                ", got " + std::to_string(params.size()));
+        }
+
+        return DbResult<std::string>::success(std::move(output));
     }
 };
 

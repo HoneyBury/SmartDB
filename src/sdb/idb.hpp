@@ -34,6 +34,7 @@ public:
  // 基础执行
  // query: 用于 SELECT, 返回结果集
  virtual DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) = 0;
+ virtual DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const std::vector<DbValue>& params) = 0;
  // execute: 用于 INSERT/UPDATE/DELETE, 返回受影响行数
  virtual DbResult<int64_t> execute(const std::string& sql) = 0;
 
