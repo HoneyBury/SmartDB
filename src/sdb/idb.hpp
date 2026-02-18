@@ -46,6 +46,78 @@ public:
  virtual DbResult<void> rollback() = 0;
 };
 
+class TransactionGuard {
+public:
+ static DbResult<TransactionGuard> begin(IConnection& conn) {
+     auto res = conn.begin();
+     if (!res) {
+         return DbResult<TransactionGuard>::failure(res.error().message, res.error().code);
+     }
+     return DbResult<TransactionGuard>::success(TransactionGuard(conn));
+ }
+
+ TransactionGuard(TransactionGuard&& other) noexcept
+     : conn_(other.conn_), active_(other.active_) {
+     other.conn_ = nullptr;
+     other.active_ = false;
+ }
+
+ TransactionGuard& operator=(TransactionGuard&& other) noexcept {
+     if (this == &other) {
+         return *this;
+     }
+     if (active_ && conn_) {
+         (void)conn_->rollback();
+     }
+     conn_ = other.conn_;
+     active_ = other.active_;
+     other.conn_ = nullptr;
+     other.active_ = false;
+     return *this;
+ }
+
+ TransactionGuard(const TransactionGuard&) = delete;
+ TransactionGuard& operator=(const TransactionGuard&) = delete;
+
+ ~TransactionGuard() {
+     if (active_ && conn_) {
+         (void)conn_->rollback();
+     }
+ }
+
+ DbResult<void> commit() {
+     if (!active_ || !conn_) {
+         return DbResult<void>::failure("Transaction is not active");
+     }
+     auto res = conn_->commit();
+     if (!res) {
+         return res;
+     }
+     active_ = false;
+     return DbResult<void>::success();
+ }
+
+ DbResult<void> rollback() {
+     if (!active_ || !conn_) {
+         return DbResult<void>::failure("Transaction is not active");
+     }
+     auto res = conn_->rollback();
+     if (!res) {
+         return res;
+     }
+     active_ = false;
+     return DbResult<void>::success();
+ }
+
+ bool active() const { return active_; }
+
+private:
+ explicit TransactionGuard(IConnection& conn) : conn_(&conn), active_(true) {}
+
+ IConnection* conn_ = nullptr;
+ bool active_ = false;
+};
+
 // 驱动工厂接口
 class IDriver {
 public:

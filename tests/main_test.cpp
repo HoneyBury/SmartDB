@@ -44,6 +44,82 @@ TEST(SdbTypesTest, ToStringAndNullHelpers) {
     EXPECT_EQ(sdb::toString(boolValue), "true");
 }
 
+namespace {
+
+class FakeTxConnection : public sdb::IConnection {
+public:
+    bool beginShouldFail = false;
+    int beginCount = 0;
+    int commitCount = 0;
+    int rollbackCount = 0;
+
+    sdb::DbResult<void> open() override { return sdb::DbResult<void>::success(); }
+    void close() override {}
+    bool isOpen() const override { return true; }
+    sdb::DbResult<std::shared_ptr<sdb::IResultSet>> query(const std::string&) override {
+        return sdb::DbResult<std::shared_ptr<sdb::IResultSet>>::failure("Not implemented");
+    }
+    sdb::DbResult<int64_t> execute(const std::string&) override {
+        return sdb::DbResult<int64_t>::failure("Not implemented");
+    }
+    sdb::DbResult<int64_t> execute(const std::string&, const std::vector<sdb::DbValue>&) override {
+        return sdb::DbResult<int64_t>::failure("Not implemented");
+    }
+    sdb::DbResult<void> begin() override {
+        ++beginCount;
+        if (beginShouldFail) {
+            return sdb::DbResult<void>::failure("begin failed");
+        }
+        return sdb::DbResult<void>::success();
+    }
+    sdb::DbResult<void> commit() override {
+        ++commitCount;
+        return sdb::DbResult<void>::success();
+    }
+    sdb::DbResult<void> rollback() override {
+        ++rollbackCount;
+        return sdb::DbResult<void>::success();
+    }
+};
+
+} // namespace
+
+TEST(TransactionGuardTest, RollsBackWhenNotCommitted) {
+    FakeTxConnection conn;
+    {
+        auto txRes = sdb::TransactionGuard::begin(conn);
+        ASSERT_TRUE(txRes) << txRes.error().message;
+        ASSERT_TRUE(txRes.value().active());
+    }
+    EXPECT_EQ(conn.beginCount, 1);
+    EXPECT_EQ(conn.commitCount, 0);
+    EXPECT_EQ(conn.rollbackCount, 1);
+}
+
+TEST(TransactionGuardTest, CommitDisarmsAutoRollback) {
+    FakeTxConnection conn;
+    {
+        auto txRes = sdb::TransactionGuard::begin(conn);
+        ASSERT_TRUE(txRes) << txRes.error().message;
+        auto commitRes = txRes.value().commit();
+        ASSERT_TRUE(commitRes) << commitRes.error().message;
+        EXPECT_FALSE(txRes.value().active());
+    }
+    EXPECT_EQ(conn.beginCount, 1);
+    EXPECT_EQ(conn.commitCount, 1);
+    EXPECT_EQ(conn.rollbackCount, 0);
+}
+
+TEST(TransactionGuardTest, BeginFailureReturnsError) {
+    FakeTxConnection conn;
+    conn.beginShouldFail = true;
+
+    auto txRes = sdb::TransactionGuard::begin(conn);
+    EXPECT_FALSE(txRes);
+    EXPECT_NE(txRes.error().message.find("begin failed"), std::string::npos);
+    EXPECT_EQ(conn.beginCount, 1);
+}
+
 TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
     sdb::drivers::SqliteDriver driver;
     auto conn = driver.createConnection({{"path", ":memory:"}});
@@ -169,6 +245,63 @@ TEST(ConnectionPoolTest, ConcurrentAcquireRespectsMaxSize) {
     EXPECT_LE(maxInUse, static_cast<int>(options.maxSize));
     EXPECT_LE(pool->totalSize(), options.maxSize);
     EXPECT_EQ(pool->idleSize(), pool->totalSize());
+}
+
+TEST(ConnectionPoolTest, MetricsTrackTimeoutAndPeakUsage) {
+    auto driver = std::make_shared<sdb::drivers::SqliteDriver>();
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.minSize = 0;
+    options.waitTimeout = std::chrono::milliseconds(40);
+
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        [driver]() {
+            return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::success(
+                driver->createConnection({{"path", ":memory:"}}));
+        },
+        options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
+
+    auto firstRes = pool->acquire();
+    ASSERT_TRUE(firstRes) << firstRes.error().message;
+    auto first = std::move(firstRes.value());
+
+    auto secondRes = pool->acquire();
+    EXPECT_FALSE(secondRes);
+    EXPECT_NE(secondRes.error().message.find("timed out"), std::string::npos);
+
+    first.reset();
+
+    const auto metrics = pool->metrics();
+    EXPECT_EQ(metrics.acquireAttempts, 2);
+    EXPECT_EQ(metrics.acquireSuccesses, 1);
+    EXPECT_EQ(metrics.acquireFailures, 1);
+    EXPECT_EQ(metrics.acquireTimeouts, 1);
+    EXPECT_GE(metrics.waitEvents, 1);
+    EXPECT_GE(metrics.peakInUse, static_cast<size_t>(1));
+    EXPECT_GT(metrics.totalAcquireWaitMicros, static_cast<uint64_t>(0));
+}
+
+TEST(ConnectionPoolTest, MetricsTrackFactoryFailures) {
+    sdb::ConnectionPool::Options options;
+    options.maxSize = 1;
+    options.waitTimeout = std::chrono::milliseconds(10);
+
+    auto poolRes = sdb::ConnectionPool::createWithFactory(
+        []() { return sdb::DbResult<std::unique_ptr<sdb::IConnection>>::failure("factory boom"); },
+        options);
+    ASSERT_TRUE(poolRes) << poolRes.error().message;
+    auto pool = poolRes.value();
+
+    auto connRes = pool->acquire();
+    EXPECT_FALSE(connRes);
+    EXPECT_NE(connRes.error().message.find("factory boom"), std::string::npos);
+
+    const auto metrics = pool->metrics();
+    EXPECT_EQ(metrics.acquireAttempts, 1);
+    EXPECT_EQ(metrics.acquireFailures, 1);
+    EXPECT_EQ(metrics.factoryFailures, 1);
 }
 
 TEST(ConnectionPoolTest, CreateFromDatabaseManagerConfig) {
