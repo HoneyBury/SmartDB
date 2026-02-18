@@ -296,21 +296,33 @@ TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {
 
 namespace {
 
+std::string readEnvOrDefault(const char* key, const char* fallback) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, key) != 0 || value == nullptr) {
+        return std::string(fallback);
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(key);
+    return std::string(value ? value : fallback);
+#endif
+}
+
 bool mysqlTestEnabled() {
-    const char* enabled = std::getenv("SMARTDB_MYSQL_TEST_ENABLE");
-    if (!enabled) {
+    const std::string value = readEnvOrDefault("SMARTDB_MYSQL_TEST_ENABLE", "");
+    if (value.empty()) {
         return false;
     }
-    const std::string value(enabled);
     return value == "1" || value == "true" || value == "TRUE" || value == "on" || value == "ON";
 }
 
 nlohmann::json mysqlConfigFromEnv() {
     nlohmann::json cfg;
-    const auto read = [](const char* key, const char* fallback) {
-        const char* value = std::getenv(key);
-        return std::string(value ? value : fallback);
-    };
+    const auto read = [](const char* key, const char* fallback) { return readEnvOrDefault(key, fallback); };
 
     cfg["host"] = read("SMARTDB_MYSQL_HOST", "127.0.0.1");
     cfg["port"] = std::stoi(read("SMARTDB_MYSQL_PORT", "3306"));
