@@ -56,10 +56,12 @@ public:
 
     static DbResult<std::shared_ptr<ConnectionPool>> createWithFactory(Factory factory, Options options) {
         if (!factory) {
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure("ConnectionPool requires a valid factory");
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(
+                "ConnectionPool requires a valid factory", 0, DbErrorKind::InvalidArgument, false);
         }
         if (options.maxSize == 0) {
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure("ConnectionPool maxSize must be greater than 0");
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(
+                "ConnectionPool maxSize must be greater than 0", 0, DbErrorKind::InvalidArgument, false);
         }
         if (options.minSize > options.maxSize) {
             options.minSize = options.maxSize;
@@ -78,7 +80,7 @@ public:
             const std::string error = "Connection pool is closed";
             lastError_ = error;
             recordFailureLocked(acquireStart, false);
-            return DbResult<Handle>::failure(error);
+            return DbResult<Handle>::failure(error, 0, DbErrorKind::Connection, true);
         }
 
         const auto deadline = std::chrono::steady_clock::now() + options_.waitTimeout;
@@ -99,7 +101,7 @@ public:
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
                         recordFailureLocked(acquireStart, false);
-                        return DbResult<Handle>::failure(lastError_);
+                        return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                     }
                     continue;
                 }
@@ -125,7 +127,7 @@ public:
                     }
                     cv_.notify_one();
                     recordFailureLocked(acquireStart, false);
-                    return DbResult<Handle>::failure(lastError_);
+                    return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                 }
 
                 auto conn = std::move(connRes.value());
@@ -139,7 +141,7 @@ public:
                     if (options_.waitTimeout.count() == 0 ||
                         std::chrono::steady_clock::now() >= deadline) {
                         recordFailureLocked(acquireStart, false);
-                        return DbResult<Handle>::failure(lastError_);
+                        return DbResult<Handle>::failure(lastError_, 0, DbErrorKind::Connection, true);
                     }
                     continue;
                 }
@@ -154,7 +156,7 @@ public:
                 const std::string error = "Connection pool exhausted";
                 lastError_ = error;
                 recordFailureLocked(acquireStart, false);
-                return DbResult<Handle>::failure(error);
+                return DbResult<Handle>::failure(error, 0, DbErrorKind::Connection, true);
             }
 
             ++waitEvents_;
@@ -162,7 +164,7 @@ public:
                 const std::string error = "Connection pool acquire timed out";
                 lastError_ = error;
                 recordFailureLocked(acquireStart, true);
-                return DbResult<Handle>::failure(error);
+                return DbResult<Handle>::failure(error, 0, DbErrorKind::Timeout, true);
             }
         }
     }
@@ -296,7 +298,13 @@ private:
                 setError(msg);
                 std::lock_guard<std::mutex> lock(mtx_);
                 ++factoryFailures_;
-                return DbResult<std::unique_ptr<IConnection>>::failure(msg, connRes.error().code);
+                DbError err = connRes.error();
+                err.message = msg;
+                if (err.kind == DbErrorKind::Unknown) {
+                    err.kind = DbErrorKind::Internal;
+                }
+                err.retryable = true;
+                return DbResult<std::unique_ptr<IConnection>>::failure(std::move(err));
             }
 
             auto conn = std::move(connRes.value());
@@ -305,7 +313,7 @@ private:
                 setError(msg);
                 std::lock_guard<std::mutex> lock(mtx_);
                 ++factoryFailures_;
-                return DbResult<std::unique_ptr<IConnection>>::failure(msg);
+                return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
             }
 
             return DbResult<std::unique_ptr<IConnection>>::success(std::move(conn));
@@ -314,13 +322,13 @@ private:
             setError(msg);
             std::lock_guard<std::mutex> lock(mtx_);
             ++factoryFailures_;
-            return DbResult<std::unique_ptr<IConnection>>::failure(msg);
+            return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
         } catch (...) {
             const std::string msg = "Connection factory error: unknown exception";
             setError(msg);
             std::lock_guard<std::mutex> lock(mtx_);
             ++factoryFailures_;
-            return DbResult<std::unique_ptr<IConnection>>::failure(msg);
+            return DbResult<std::unique_ptr<IConnection>>::failure(msg, 0, DbErrorKind::Internal, true);
         }
     }
 

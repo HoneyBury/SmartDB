@@ -10,12 +10,12 @@ using DbRow = std::vector<DbValue>;
 inline DbResult<DbRow> queryOne(IConnection& conn, const std::string& sql) {
     auto rsRes = conn.query(sql);
     if (!rsRes) {
-        return DbResult<DbRow>::failure(rsRes.error().message, rsRes.error().code);
+        return DbResult<DbRow>::failure(rsRes.error());
     }
 
     auto rs = rsRes.value();
     if (!rs || !rs->next()) {
-        return DbResult<DbRow>::failure("No rows returned");
+        return DbResult<DbRow>::failure("No rows returned", 0, DbErrorKind::NotFound, false);
     }
 
     const auto cols = rs->columnNames();
@@ -30,7 +30,7 @@ inline DbResult<DbRow> queryOne(IConnection& conn, const std::string& sql) {
 inline DbResult<std::vector<DbRow>> queryAll(IConnection& conn, const std::string& sql) {
     auto rsRes = conn.query(sql);
     if (!rsRes) {
-        return DbResult<std::vector<DbRow>>::failure(rsRes.error().message, rsRes.error().code);
+        return DbResult<std::vector<DbRow>>::failure(rsRes.error());
     }
 
     auto rs = rsRes.value();

@@ -24,7 +24,7 @@ public:
         if (!driver) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "Driver is null";
-            return DbResult<void>::failure(lastError_);
+            return DbResult<void>::failure(lastError_, 0, DbErrorKind::InvalidArgument, false);
         }
 
         std::lock_guard<std::mutex> lock(mtx_);
@@ -41,7 +41,7 @@ public:
                 lastError_ = "Cannot open config file: " + filePath;
             }
             spdlog::error("Cannot open config file: {}", filePath);
-            return DbResult<void>::failure(lastError_);
+            return DbResult<void>::failure(lastError_, 0, DbErrorKind::Configuration, false);
         }
 
         try {
@@ -52,7 +52,7 @@ public:
                     lastError_ = "Invalid config file format: missing object key 'connections'";
                 }
                 spdlog::error("Invalid config file format: missing object key 'connections'");
-                return DbResult<void>::failure(lastError_);
+                return DbResult<void>::failure(lastError_, 0, DbErrorKind::Configuration, false);
             }
 
             std::lock_guard<std::mutex> lock(mtx_);
@@ -66,7 +66,7 @@ public:
                 lastError_ = std::string("JSON parse error: ") + e.what();
             }
             spdlog::error("JSON parse error: {}", e.what());
-            return DbResult<void>::failure(lastError_);
+            return DbResult<void>::failure(lastError_, 0, DbErrorKind::Configuration, false);
         }
     }
 
@@ -75,26 +75,26 @@ public:
 
         if (!configs_.contains(connectionName)) {
             lastError_ = "Connection config not found: " + connectionName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::NotFound, false);
         }
 
         const auto& config = configs_[connectionName];
         std::string driverName = config.value("driver", "");
         if (driverName.empty()) {
             lastError_ = "Missing required field 'driver' for connection: " + connectionName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::Configuration, false);
         }
 
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
             lastError_ = "Driver not supported or registered: " + driverName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::NotFound, false);
         }
 
         auto conn = it->second->createConnection(config);
         if (!conn) {
             lastError_ = "Driver factory returned null connection: " + driverName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::Internal, true);
         }
 
         lastError_.clear();
@@ -106,12 +106,12 @@ public:
         auto it = drivers_.find(driverName);
         if (it == drivers_.end()) {
             lastError_ = "Driver not found: " + driverName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::NotFound, false);
         }
         auto conn = it->second->createConnection(config);
         if (!conn) {
             lastError_ = "Driver factory returned null connection: " + driverName;
-            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_);
+            return DbResult<std::unique_ptr<IConnection>>::failure(lastError_, 0, DbErrorKind::Internal, true);
         }
 
         lastError_.clear();
@@ -128,7 +128,7 @@ public:
         if (options.maxSize == 0) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "ConnectionPool maxSize must be greater than 0";
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_, 0, DbErrorKind::InvalidArgument, false);
         }
 
         const auto key = poolKeyForName(connectionName, options);
@@ -148,7 +148,7 @@ public:
         if (!poolRes) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = poolRes.error().message;
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(poolRes.error());
         }
         auto pool = std::move(poolRes.value());
 
@@ -177,7 +177,7 @@ public:
         if (options.maxSize == 0) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = "ConnectionPool maxSize must be greater than 0";
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_, 0, DbErrorKind::InvalidArgument, false);
         }
 
         const auto key = poolKeyForRaw(driverName, config, options);
@@ -190,7 +190,7 @@ public:
             }
             if (drivers_.find(driverName) == drivers_.end()) {
                 lastError_ = "Driver not found: " + driverName;
-                return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
+                return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_, 0, DbErrorKind::NotFound, false);
             }
         }
 
@@ -201,7 +201,7 @@ public:
         if (!poolRes) {
             std::lock_guard<std::mutex> lock(mtx_);
             lastError_ = poolRes.error().message;
-            return DbResult<std::shared_ptr<ConnectionPool>>::failure(lastError_);
+            return DbResult<std::shared_ptr<ConnectionPool>>::failure(poolRes.error());
         }
         auto pool = std::move(poolRes.value());
 

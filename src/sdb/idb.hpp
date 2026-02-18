@@ -52,7 +52,7 @@ public:
  static DbResult<TransactionGuard> begin(IConnection& conn) {
      auto res = conn.begin();
      if (!res) {
-         return DbResult<TransactionGuard>::failure(res.error().message, res.error().code);
+         return DbResult<TransactionGuard>::failure(res.error());
      }
      return DbResult<TransactionGuard>::success(TransactionGuard(conn));
  }
@@ -88,7 +88,7 @@ public:
 
  DbResult<void> commit() {
      if (!active_ || !conn_) {
-         return DbResult<void>::failure("Transaction is not active");
+         return DbResult<void>::failure("Transaction is not active", 0, DbErrorKind::Transaction, false);
      }
      auto res = conn_->commit();
      if (!res) {
@@ -100,7 +100,7 @@ public:
 
  DbResult<void> rollback() {
      if (!active_ || !conn_) {
-         return DbResult<void>::failure("Transaction is not active");
+         return DbResult<void>::failure("Transaction is not active", 0, DbErrorKind::Transaction, false);
      }
      auto res = conn_->rollback();
      if (!res) {

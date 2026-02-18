@@ -21,9 +21,25 @@ using DbValue = std::variant<
     std::vector<uint8_t>    // Blob/Binary
 >;
 
+enum class DbErrorKind {
+ Unknown = 0,
+ Configuration,
+ Connection,
+ Authentication,
+ Timeout,
+ NotFound,
+ InvalidArgument,
+ Transaction,
+ Query,
+ Execution,
+ Internal
+};
+
 struct DbError {
  int code = 0;
  std::string message;
+ DbErrorKind kind = DbErrorKind::Unknown;
+ bool retryable = false;
 };
 
 template <typename T>
@@ -34,7 +50,15 @@ public:
  }
 
  static DbResult failure(std::string message, int code = 0) {
-     return DbResult(DbError{code, std::move(message)});
+     return DbResult(DbError{code, std::move(message), DbErrorKind::Unknown, false});
+ }
+
+ static DbResult failure(std::string message, int code, DbErrorKind kind, bool retryable = false) {
+     return DbResult(DbError{code, std::move(message), kind, retryable});
+ }
+
+ static DbResult failure(DbError error) {
+     return DbResult(std::move(error));
  }
 
  bool ok() const { return value_.has_value(); }
@@ -59,7 +83,15 @@ public:
  static DbResult success() { return DbResult(true, {}); }
 
  static DbResult failure(std::string message, int code = 0) {
-     return DbResult(false, DbError{code, std::move(message)});
+     return DbResult(false, DbError{code, std::move(message), DbErrorKind::Unknown, false});
+ }
+
+ static DbResult failure(std::string message, int code, DbErrorKind kind, bool retryable = false) {
+     return DbResult(false, DbError{code, std::move(message), kind, retryable});
+ }
+
+ static DbResult failure(DbError error) {
+     return DbResult(false, std::move(error));
  }
 
  bool ok() const { return ok_; }

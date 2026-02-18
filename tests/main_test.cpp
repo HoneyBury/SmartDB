@@ -177,6 +177,8 @@ TEST(SqliteDriverTest, ParameterizedQueryMismatchShouldFail) {
 
     auto rsRes = conn->query("SELECT name FROM demo3 WHERE id = ?", {int64_t{1}, std::string("extra")});
     EXPECT_FALSE(rsRes);
+    EXPECT_EQ(rsRes.error().kind, sdb::DbErrorKind::InvalidArgument);
+    EXPECT_FALSE(rsRes.error().retryable);
 }
 
 TEST(QueryUtilsTest, QueryOneReturnsSingleRow) {
@@ -206,6 +208,18 @@ TEST(QueryUtilsTest, QueryAllReturnsAllRows) {
     ASSERT_EQ(rowsRes.value().size(), 2);
     EXPECT_EQ(std::get<int64_t>(rowsRes.value()[0][0]), 1);
     EXPECT_EQ(std::get<std::string>(rowsRes.value()[1][1]), "b");
+}
+
+TEST(QueryUtilsTest, QueryOneNoRowsReturnsNotFound) {
+    sdb::drivers::SqliteDriver driver;
+    auto conn = driver.createConnection({{"path", ":memory:"}});
+    ASSERT_TRUE(conn->open());
+    ASSERT_TRUE(conn->execute("CREATE TABLE t3 (id INTEGER)"));
+
+    auto rowRes = sdb::queryOne(*conn, "SELECT id FROM t3 WHERE id = 1");
+    EXPECT_FALSE(rowRes);
+    EXPECT_EQ(rowRes.error().kind, sdb::DbErrorKind::NotFound);
+    EXPECT_FALSE(rowRes.error().retryable);
 }
 
 TEST(ConnectionPoolTest, ReusesSingleConnection) {
@@ -253,6 +267,8 @@ TEST(ConnectionPoolTest, ExhaustedPoolTimesOut) {
     auto conn2Res = pool->acquire();
     EXPECT_FALSE(conn2Res);
     EXPECT_NE(conn2Res.error().message.find("timed out"), std::string::npos);
+    EXPECT_EQ(conn2Res.error().kind, sdb::DbErrorKind::Timeout);
+    EXPECT_TRUE(conn2Res.error().retryable);
     EXPECT_LE(pool->totalSize(), options.maxSize);
 }
 
@@ -476,6 +492,8 @@ TEST(DatabaseManagerTest, MissingConfigUsesLastErrorInsteadOfException) {
     auto connRes = manager.createConnection("missing_name");
     EXPECT_FALSE(connRes);
     EXPECT_NE(connRes.error().message.find("Connection config not found"), std::string::npos);
+    EXPECT_EQ(connRes.error().kind, sdb::DbErrorKind::NotFound);
+    EXPECT_FALSE(connRes.error().retryable);
 }
 
 TEST(DatabaseManagerTest, CreatePoolRawUnknownDriverShouldFailGracefully) {

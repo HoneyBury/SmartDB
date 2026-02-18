@@ -138,7 +138,7 @@ public:
         conn_ = mysql_init(nullptr);
         if (!conn_) {
             lastErr_ = "mysql_init failed: out of memory";
-            return DbResult<void>::failure(lastErr_);
+            return DbResult<void>::failure(lastErr_, 0, DbErrorKind::Connection, true);
         }
 
         const std::string host = config_.value("host", "127.0.0.1");
@@ -159,7 +159,7 @@ public:
             const int errCode = mysql_errno(conn_);
             mysql_close(conn_);
             conn_ = nullptr;
-            return DbResult<void>::failure(lastErr_, errCode);
+            return DbResult<void>::failure(lastErr_, errCode, DbErrorKind::Connection, true);
         }
 
         lastErr_.clear();
@@ -178,13 +178,13 @@ public:
     DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, 0, DbErrorKind::Connection, true);
         }
 
         if (mysql_query(conn_, sql.c_str())) {
             lastErr_ = mysql_error(conn_);
             spdlog::error("MySQL Query Error: {} | SQL: {}", lastErr_, sql);
-            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_));
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_), DbErrorKind::Query, false);
         }
 
         MYSQL_RES* res = mysql_store_result(conn_);
@@ -192,7 +192,7 @@ public:
             if (mysql_field_count(conn_) > 0) {
                 lastErr_ = mysql_error(conn_);
                 spdlog::error("MySQL Store Result Error: {}", lastErr_);
-                return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_));
+                return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, mysql_errno(conn_), DbErrorKind::Query, false);
             }
             return DbResult<std::shared_ptr<IResultSet>>::success(std::make_shared<MysqlResultSet>(nullptr));
         }
@@ -204,13 +204,13 @@ public:
     DbResult<std::shared_ptr<IResultSet>> query(const std::string& sql, const std::vector<DbValue>& params) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_);
+            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, 0, DbErrorKind::Connection, true);
         }
 
         auto interpolated = interpolateQuery(sql, params);
         if (!interpolated) {
             lastErr_ = interpolated.error().message;
-            return DbResult<std::shared_ptr<IResultSet>>::failure(lastErr_, interpolated.error().code);
+            return DbResult<std::shared_ptr<IResultSet>>::failure(interpolated.error());
         }
 
         return query(interpolated.value());
@@ -219,13 +219,13 @@ public:
     DbResult<int64_t> execute(const std::string& sql) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return DbResult<int64_t>::failure(lastErr_);
+            return DbResult<int64_t>::failure(lastErr_, 0, DbErrorKind::Connection, true);
         }
 
         if (mysql_query(conn_, sql.c_str())) {
             lastErr_ = mysql_error(conn_);
             spdlog::error("MySQL Execute Error: {} | SQL: {}", lastErr_, sql);
-            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_));
+            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_), DbErrorKind::Execution, false);
         }
 
         lastErr_.clear();
@@ -235,13 +235,13 @@ public:
     DbResult<int64_t> execute(const std::string& sql, const std::vector<DbValue>& params) override {
         if (!isOpen()) {
             lastErr_ = "Connection is closed";
-            return DbResult<int64_t>::failure(lastErr_);
+            return DbResult<int64_t>::failure(lastErr_, 0, DbErrorKind::Connection, true);
         }
 
         MYSQL_STMT* stmt = mysql_stmt_init(conn_);
         if (!stmt) {
             lastErr_ = "mysql_stmt_init failed";
-            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_));
+            return DbResult<int64_t>::failure(lastErr_, mysql_errno(conn_), DbErrorKind::Internal, true);
         }
 
         auto cleanupStmt = [&stmt]() {
@@ -256,7 +256,7 @@ public:
             spdlog::error("MySQL Prepare Error: {} | SQL: {}", lastErr_, sql);
             const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return DbResult<int64_t>::failure(lastErr_, errCode);
+            return DbResult<int64_t>::failure(lastErr_, errCode, DbErrorKind::Execution, false);
         }
 
         const auto expectedParams = mysql_stmt_param_count(stmt);
@@ -264,7 +264,7 @@ public:
             lastErr_ = "parameter count mismatch: expected " + std::to_string(expectedParams) +
                        ", got " + std::to_string(params.size());
             cleanupStmt();
-            return DbResult<int64_t>::failure(lastErr_);
+            return DbResult<int64_t>::failure(lastErr_, 0, DbErrorKind::InvalidArgument, false);
         }
 
         std::vector<MYSQL_BIND> binds(params.size());
@@ -348,7 +348,7 @@ public:
             spdlog::error("MySQL Bind Error: {} | SQL: {}", lastErr_, sql);
             const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return DbResult<int64_t>::failure(lastErr_, errCode);
+            return DbResult<int64_t>::failure(lastErr_, errCode, DbErrorKind::InvalidArgument, false);
         }
 
         if (mysql_stmt_execute(stmt) != 0) {
@@ -356,7 +356,7 @@ public:
             spdlog::error("MySQL Stmt Execute Error: {} | SQL: {}", lastErr_, sql);
             const int errCode = mysql_stmt_errno(stmt);
             cleanupStmt();
-            return DbResult<int64_t>::failure(lastErr_, errCode);
+            return DbResult<int64_t>::failure(lastErr_, errCode, DbErrorKind::Execution, false);
         }
 
         const auto affected = static_cast<int64_t>(mysql_stmt_affected_rows(stmt));
@@ -368,7 +368,7 @@ public:
     DbResult<void> begin() override {
         auto res = execute("START TRANSACTION");
         if (!res) {
-            return DbResult<void>::failure(res.error().message, res.error().code);
+            return DbResult<void>::failure(res.error());
         }
         return DbResult<void>::success();
     }
@@ -376,7 +376,7 @@ public:
     DbResult<void> commit() override {
         auto res = execute("COMMIT");
         if (!res) {
-            return DbResult<void>::failure(res.error().message, res.error().code);
+            return DbResult<void>::failure(res.error());
         }
         return DbResult<void>::success();
     }
@@ -384,7 +384,7 @@ public:
     DbResult<void> rollback() override {
         auto res = execute("ROLLBACK");
         if (!res) {
-            return DbResult<void>::failure(res.error().message, res.error().code);
+            return DbResult<void>::failure(res.error());
         }
         return DbResult<void>::success();
     }
@@ -428,7 +428,7 @@ private:
             }
             return DbResult<std::string>::success("X'" + hex + "'");
         }
-        return DbResult<std::string>::failure("Unsupported parameter type");
+        return DbResult<std::string>::failure("Unsupported parameter type", 0, DbErrorKind::InvalidArgument, false);
     }
 
     DbResult<std::string> interpolateQuery(const std::string& sql, const std::vector<DbValue>& params) {
@@ -474,7 +474,7 @@ private:
                 if (paramIndex >= params.size()) {
                     return DbResult<std::string>::failure(
                         "parameter count mismatch: expected at least " + std::to_string(paramIndex + 1) +
-                        ", got " + std::to_string(params.size()));
+                        ", got " + std::to_string(params.size()), 0, DbErrorKind::InvalidArgument, false);
                 }
                 auto literal = toSqlLiteral(params[paramIndex++]);
                 if (!literal) {
@@ -490,7 +490,7 @@ private:
         if (paramIndex != params.size()) {
             return DbResult<std::string>::failure(
                 "parameter count mismatch: expected " + std::to_string(paramIndex) +
-                ", got " + std::to_string(params.size()));
+                ", got " + std::to_string(params.size()), 0, DbErrorKind::InvalidArgument, false);
         }
 
         return DbResult<std::string>::success(std::move(output));
