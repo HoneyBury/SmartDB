@@ -6,6 +6,7 @@ add_library(${PROJECT_NAME} STATIC
         smartdb/support.hpp
         sdb/types.hpp
         sdb/idb.hpp
+        sdb/query_utils.hpp
         sdb/db.hpp
         sdb/connection_pool.hpp
         sdb/drivers/sqlite_driver.hpp

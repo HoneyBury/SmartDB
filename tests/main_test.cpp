@@ -3,6 +3,7 @@
 #include "sdb/types.hpp"
 #include "sdb/db.hpp"
 #include "sdb/connection_pool.hpp"
+#include "sdb/query_utils.hpp"
 #include "sdb/drivers/sqlite_driver.hpp"
 #include "sdb/drivers/mysql_driver.hpp"
 
@@ -147,6 +148,35 @@ TEST(SqliteDriverTest, InMemoryInsertQueryAndBlob) {
 
     auto payload = std::get<std::vector<uint8_t>>(rs->get("payload"));
     EXPECT_EQ(payload, blob);
+}
+
+TEST(QueryUtilsTest, QueryOneReturnsSingleRow) {
+    sdb::drivers::SqliteDriver driver;
+    auto conn = driver.createConnection({{"path", ":memory:"}});
+    ASSERT_TRUE(conn->open());
+    ASSERT_TRUE(conn->execute("CREATE TABLE t (id INTEGER, name TEXT)"));
+    ASSERT_TRUE(conn->execute("INSERT INTO t VALUES (1, 'alice')"));
+
+    auto rowRes = sdb::queryOne(*conn, "SELECT id, name FROM t WHERE id = 1");
+    ASSERT_TRUE(rowRes) << rowRes.error().message;
+    ASSERT_EQ(rowRes.value().size(), 2);
+    EXPECT_EQ(std::get<int64_t>(rowRes.value()[0]), 1);
+    EXPECT_EQ(std::get<std::string>(rowRes.value()[1]), "alice");
+}
+
+TEST(QueryUtilsTest, QueryAllReturnsAllRows) {
+    sdb::drivers::SqliteDriver driver;
+    auto conn = driver.createConnection({{"path", ":memory:"}});
+    ASSERT_TRUE(conn->open());
+    ASSERT_TRUE(conn->execute("CREATE TABLE t2 (id INTEGER, name TEXT)"));
+    ASSERT_TRUE(conn->execute("INSERT INTO t2 VALUES (1, 'a')"));
+    ASSERT_TRUE(conn->execute("INSERT INTO t2 VALUES (2, 'b')"));
+
+    auto rowsRes = sdb::queryAll(*conn, "SELECT id, name FROM t2 ORDER BY id ASC");
+    ASSERT_TRUE(rowsRes) << rowsRes.error().message;
+    ASSERT_EQ(rowsRes.value().size(), 2);
+    EXPECT_EQ(std::get<int64_t>(rowsRes.value()[0][0]), 1);
+    EXPECT_EQ(std::get<std::string>(rowsRes.value()[1][1]), "b");
 }
 
 TEST(ConnectionPoolTest, ReusesSingleConnection) {
